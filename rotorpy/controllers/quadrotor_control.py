@@ -5,7 +5,7 @@ from scipy.spatial.transform import Rotation
 
 class SE3Control(object):
     """
-    Quadrotor trajectory tracking controller based on https://ieeexplore.ieee.org/document/5717652 
+    Quadrotor trajectory tracking controller based on https://ieeexplore.ieee.org/document/5717652
 
     """
     def __init__(self, quad_params):
@@ -33,7 +33,7 @@ class SE3Control(object):
         self.rotor_pos       = quad_params['rotor_pos']
         self.rotor_dir       = quad_params['rotor_directions']
 
-        # Rotor parameters    
+        # Rotor parameters
         self.rotor_speed_min = quad_params['rotor_speed_min'] # rad/s
         self.rotor_speed_max = quad_params['rotor_speed_max'] # rad/s
 
@@ -52,7 +52,7 @@ class SE3Control(object):
                                  [self.Ixz, self.Iyz, self.Izz]]) # kg*m^2
         self.g = 9.81 # m/s^2
 
-        # Gains  
+        # Gains
         self.kp_pos = np.array([6.5,6.5,15])
         self.kd_pos = np.array([4.0, 4.0, 9])
         self.kp_att = 544
@@ -61,15 +61,15 @@ class SE3Control(object):
 
         # Linear map from individual rotor forces to scalar thrust and vector
         # moment applied to the vehicle.
-        k = self.k_m/self.k_eta  # Ratio of torque to thrust coefficient. 
+        k = self.k_m/self.k_eta  # Ratio of torque to thrust coefficient.
 
         # Below is an automated generation of the control allocator matrix. It assumes that all thrust vectors are aligned
         # with the z axis.
         self.f_to_TM = np.vstack((np.ones((1,self.num_rotors)),
-                                  np.hstack([np.cross(self.rotor_pos[key],np.array([0,0,1])).reshape(-1,1)[0:2] for key in self.rotor_pos]), 
+                                  np.hstack([np.cross(self.rotor_pos[key],np.array([0,0,1])).reshape(-1,1)[0:2] for key in self.rotor_pos]),
                                  (k * self.rotor_dir).reshape(1,-1)))
         self.TM_to_f = np.linalg.inv(self.f_to_TM)
-    
+
     def update(self, t, state, flat_output):
         """
         This function receives the current time, true state, and desired flat
@@ -95,14 +95,14 @@ class SE3Control(object):
             control_input, a dict describing the present computed control inputs with keys
                 cmd_motor_speeds, rad/s
                 cmd_motor_thrusts, N
-                cmd_thrust, N 
+                cmd_thrust, N
                 cmd_moment, N*m
                 cmd_q, quaternion [i,j,k,w]
                 cmd_w, angular rates in the body frame, rad/s
                 cmd_v, velocity in the world frame, m/s
                 cmd_acc, mass normalized thrust vector in the world frame, m/s/s.
 
-                Not all keys are used, it depends on the control_abstraction selected when initializing the Multirotor object. 
+                Not all keys are used, it depends on the control_abstraction selected when initializing the Multirotor object.
         """
         cmd_motor_speeds = np.zeros((4,))
         cmd_thrust = 0
@@ -149,7 +149,7 @@ class SE3Control(object):
         # Desired torque, in units N-m.
         u2 = self.inertia @ (-self.kp_att*att_err - self.kd_att*w_err) + np.cross(state['w'], self.inertia@state['w'])  # Includes compensation for wxJw component
 
-        # Compute command body rates by doing PD on the attitude error. 
+        # Compute command body rates by doing PD on the attitude error.
         cmd_w = -self.kp_att*att_err - self.kd_att*w_err
 
         # Compute motor speeds. Avoid taking square root of negative numbers.
@@ -173,14 +173,14 @@ class SE3Control(object):
                          'cmd_w':cmd_w,
                          'cmd_v':cmd_v,
                          'cmd_acc': cmd_acc}
-        
+
         return control_input
 
 
 class BatchedSE3Control(object):
     def __init__(self, batch_params, num_drones, device, kp_pos=None, kd_pos=None, kp_att=None, kd_att=None):
         '''
-        batch_params, BatchedMultirotorParams object 
+        batch_params, BatchedMultirotorParams object
         num_drones: int, number of drones in the batch
         device: torch.device("cpu") or torch.device("cuda")
 

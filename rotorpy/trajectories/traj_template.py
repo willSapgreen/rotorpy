@@ -7,10 +7,10 @@ import torch
 class TrajTemplate(object):
     """
     The trajectory is implemented as a class. There are two required methods for each trajectory class: __init__() and update().
-    The __init__() is required for instantiating the class with appropriate parameterizations. For example, if you are doing 
-    a circular trajectory you might want to specify the radius of the circle. 
+    The __init__() is required for instantiating the class with appropriate parameterizations. For example, if you are doing
+    a circular trajectory you might want to specify the radius of the circle.
     The update() method is called at each iteration of the simulator. The only input to update is time t. The output of update()
-    should be the desired flat outputs in a dictionary, as specified below. 
+    should be the desired flat outputs in a dictionary, as specified below.
     """
     def __init__(self):
         """
@@ -56,7 +56,7 @@ class BatchedTrajTemplate(object):
         This is the constructor for the BatchedTrajectory object. A fresh trajectory
         object will be constructed before each mission.
 
-        Here the parameter M is the number of vehicles in the batch. 
+        Here the parameter M is the number of vehicles in the batch.
         """
 
     def update(self, t):

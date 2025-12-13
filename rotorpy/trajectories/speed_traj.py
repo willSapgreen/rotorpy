@@ -5,17 +5,17 @@ import numpy as np
 
 class ConstantSpeed(object):
     """
-    
+
     """
     def __init__(self, init_pos, dist=1, speed=1, axis=0, repeat=False):
         """
         Constant speed will command a step response in speed on a specified axis. The following inputs
-        try to ensure that the vehicle is not commanded to go beyond the boundaries of the environment. 
+        try to ensure that the vehicle is not commanded to go beyond the boundaries of the environment.
 
         INPUTS
             init_pos := the inital position for the trajectory to begin, should be the current quadrotor's position
-            dist := the length of the trajectory in meters. 
-            speed := the speed of the trajectory in meters. 
+            dist := the length of the trajectory in meters.
+            speed := the speed of the trajectory in meters.
             axis := the axis to travel (0 -> X, 1 -> Y, 2 -> Z)
             repeat := determines if the trajectory should repeat, where the direction is switched from its current state.
         """
@@ -24,10 +24,10 @@ class ConstantSpeed(object):
         self.dist = dist    # m
         self.speed = speed  # m/s
 
-        # Based on the length of the trajectory (distance) and the desired speed, compute how long the desired speed should be commaned. 
+        # Based on the length of the trajectory (distance) and the desired speed, compute how long the desired speed should be commaned.
         self.t_width = self.dist/self.speed  # seconds
-        
-        # Create a vector where the "axis'th" element is 1 and the other elements are 0. This will multiplied by the flat outputs 
+
+        # Create a vector where the "axis'th" element is 1 and the other elements are 0. This will multiplied by the flat outputs
         # so that the only "active" axis is the one specified by "axis"
         self.active_axis = np.zeros((3,))
         self.active_axis[axis] = 1
@@ -85,7 +85,7 @@ if __name__=="__main__":
 
     t = np.linspace(0,10,500)
     x = np.zeros((t.shape[0], 3))
-    
+
     for i in range(t.shape[0]):
         flat = traj.update(t[i])
         x[i,:] = flat['x']
@@ -101,6 +101,5 @@ if __name__=="__main__":
     ax.plot(t, x[:,2], 'b', linewidth=1.5)
     ax.set_ylabel("Z, m")
     ax.set_xlabel("Time, s")
-    
+
     plt.show()
-    

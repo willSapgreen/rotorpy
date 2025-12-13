@@ -1,6 +1,6 @@
 """
 This example will demonstrate the capability of RotorPy by evaluating an
-Unscented Kalman Filter designed to do wind estimation for a quadrotor UAV. 
+Unscented Kalman Filter designed to do wind estimation for a quadrotor UAV.
 
 First, we'll import some useful Python packages.
 """
@@ -14,8 +14,8 @@ import matplotlib.pyplot as plt
 np.random.seed(0)    # For repeatability we will set the seed for the RNG
 
 """
-Next, let's import the simulator and its important modules: a vehicle, 
-controller, some trajectories, and wind. 
+Next, let's import the simulator and its important modules: a vehicle,
+controller, some trajectories, and wind.
 """
 
 from rotorpy.environments import Environment
@@ -37,8 +37,8 @@ from rotorpy.estimators.wind_ukf import WindUKF
 from rotorpy.estimators.wind_ekf import WindEKF
 
 """
-Next we'll define a useful function. It's a script for automatically 
-fitting a quadratic drag model to the calibration data we'll collect. 
+Next we'll define a useful function. It's a script for automatically
+fitting a quadratic drag model to the calibration data we'll collect.
 """
 
 def auto_system_identification(mass, body_vel, abs_acceleration, plot=False):
@@ -48,14 +48,14 @@ def auto_system_identification(mass, body_vel, abs_acceleration, plot=False):
         mass, the mass of the UAV, kg
         body_vel, the velocity of the UAV in the body axes, m/s
         abs_acceleration, absolute value of accelerometer measurements minus thrust, m/s/s
-        plot, bool to plot accelerometer vs speed. 
+        plot, bool to plot accelerometer vs speed.
     Outputs:
         Fitted drag coefficients for a quadratic drag model.
     """
     def parabola(x, A):
         return A*(x**2)
-    
-    # The main assumption is that the only other forces acting on the vehicle are drag. 
+
+    # The main assumption is that the only other forces acting on the vehicle are drag.
     # We assume the only source of drag is parastic drag, of the form: F_D = -c_D*|V|*V
 
     Ax, _ = sp.optimize.curve_fit(parabola, body_vel[:,0], abs_acceleration[:,0])
@@ -124,7 +124,7 @@ for i in range(num_trials):
     print("Trial %d/%d" % (i+1, num_trials))
     """
     Setup: randomly select quadrotor parameters and wind parameters.
-    Instantiate the quadrotor and a stabilizing controller. 
+    Instantiate the quadrotor and a stabilizing controller.
     """
     # Randomize the parameters for the quadrotor
     trial_params = copy.deepcopy(quad_params)  # Get a copy of the quadrotor parameters (this prevents overwriting)
@@ -149,10 +149,10 @@ for i in range(num_trials):
     se3_controller = SE3Control(trial_params)
 
     """
-    Generate the calibration data. 
+    Generate the calibration data.
     """
     print("Generating calibration data...")
-    # Initialize the quadrotor hovering. 
+    # Initialize the quadrotor hovering.
     hover_speed = np.sqrt(trial_params['mass']*9.81/(4*trial_params['k_eta']))
     x0 = calibration_traj.update(0)['x']
     initial_state = {'x': x0,
@@ -161,7 +161,7 @@ for i in range(num_trials):
                      'w': np.zeros(3,),
                      'wind': np.array([0,0,0]),  # Since wind is handled elsewhere, this value is overwritten
                      'rotor_speeds': np.ones((4,))*hover_speed}
-    
+
     calibration_instance = Environment(vehicle=quadrotor,
                               controller=se3_controller,
                               trajectory=calibration_traj,
@@ -182,7 +182,7 @@ for i in range(num_trials):
     q = calibration_data[['qx', 'qy', 'qz', 'qw']].to_numpy()
     vel = (calibration_data[['xdot', 'ydot', 'zdot']].to_numpy())[..., np.newaxis]
     R = sp.spatial.transform.Rotation.from_quat(q).as_matrix()
-    RT = np.transpose(R, axes=[0,2,1]) 
+    RT = np.transpose(R, axes=[0,2,1])
     body_vel = (RT@vel)[:,:,0]
 
     # Extract the acceleration, compute the acceleration minus the commanded thrust to isolate aerodynamic forces
@@ -195,29 +195,29 @@ for i in range(num_trials):
     print("Fitted aero parameters.")
 
     """
-    Set up the estimators. There is an EKF and UKF. You can choose 
-    which one to evaluate when setting up the evaluation instance of the 
-    simulator. 
+    Set up the estimators. There is an EKF and UKF. You can choose
+    which one to evaluate when setting up the evaluation instance of the
+    simulator.
     """
     # Copy the trial parameters. The filtes use the parasitic drag coefficients
-    # for the process model, so use the fitted coefficients from the previous step. 
+    # for the process model, so use the fitted coefficients from the previous step.
     estimator_params = copy.deepcopy(trial_params)
     estimator_params['c_Dx'] = fit_c_Dx
     estimator_params['c_Dy'] = fit_c_Dy
     estimator_params['c_Dz'] = fit_c_Dz
 
-    # Initialize the filters using the mean wind speed. 
+    # Initialize the filters using the mean wind speed.
     xhat0 = np.array([0.0, 0.0, 0.0, 0.01, 0.01, 0.01, wx, wy, wz])
     wind_ukf = WindUKF(estimator_params,Q=Q,xhat0=xhat0,P0=P0,dt=1/100,alpha=1e-3,beta=2,kappa=-1)
     wind_ekf = WindEKF(estimator_params,Q=Q,xhat0=xhat0,P0=P0,dt=1/100)
 
     """
-    Run the evaluation. The quadrotor will hover while being subject to 
-    Dryden Gust. You can switch between the UKF and EKF by changing the 
-    'estimator' argument accordingly. 
+    Run the evaluation. The quadrotor will hover while being subject to
+    Dryden Gust. You can switch between the UKF and EKF by changing the
+    'estimator' argument accordingly.
     """
     print("Evaluating the filter...")
-    evaluation_traj = HoverTraj()  
+    evaluation_traj = HoverTraj()
     evaluation_instance = Environment(vehicle=quadrotor,
                                       controller=se3_controller,
                                       trajectory=evaluation_traj,
@@ -227,9 +227,9 @@ for i in range(num_trials):
     evaluation_results = evaluation_instance.run(t_final = 10,       # The maximum duration of the environment in seconds
                                                  plot = False,
                                                  verbose= True)
-    
+
     """
-    Post process the evaluation results. 
+    Post process the evaluation results.
     """
     evaluation_data = unpack_sim_data(evaluation_results)
 
@@ -237,14 +237,14 @@ for i in range(num_trials):
     q = evaluation_data[['qx', 'qy', 'qz', 'qw']].to_numpy()
     wind = (evaluation_data[['windx', 'windy', 'windz']].to_numpy())[..., np.newaxis]
     R = sp.spatial.transform.Rotation.from_quat(q).as_matrix()
-    RT = np.transpose(R, axes=[0,2,1]) 
+    RT = np.transpose(R, axes=[0,2,1])
     body_wind = (RT@wind)[:,:,0]
 
-    # Extract the wind states from the filter. 
+    # Extract the wind states from the filter.
     wind_est = evaluation_data[['xhat_6', 'xhat_7', 'xhat_8']].to_numpy()
 
     """
-    Compute the RMSE between the wind estimate and the ground truth estimate. 
+    Compute the RMSE between the wind estimate and the ground truth estimate.
     """
     print("Computing and saving metrics...")
     # Compute root mean square error
@@ -258,7 +258,7 @@ for i in range(num_trials):
          plot_time = evaluation_data['time'].to_numpy()
 
     """
-    Save the vehicle parameters and the filter performance for plotting. 
+    Save the vehicle parameters and the filter performance for plotting.
     """
 
     mass[i] = trial_params['mass']
@@ -270,7 +270,7 @@ for i in range(num_trials):
     print("------------------------------------------------------------------")
 
 """
-Plot the RMSE for each body axis. 
+Plot the RMSE for each body axis.
 """
 
 # Box and Whisker plot
@@ -284,8 +284,8 @@ capprops = dict(linestyle='-', linewidth=1.5, color='k')
 plt.rcParams["font.family"] = "serif"
 plt.rcParams["figure.autolayout"] = True
 RMSE_data = pd.DataFrame({"X Axis": wind_rmse[:,0], "Y Axis": wind_rmse[:,1], "Z Axis": wind_rmse[:,2]})
-ax = RMSE_data[['X Axis', 'Y Axis', 'Z Axis']].plot(kind='box', title="", 
-                                                    boxprops=boxprops, medianprops=medianprops, flierprops=flierprops, 
+ax = RMSE_data[['X Axis', 'Y Axis', 'Z Axis']].plot(kind='box', title="",
+                                                    boxprops=boxprops, medianprops=medianprops, flierprops=flierprops,
                                                     whiskerprops=whiskerprops, capprops=capprops)
 ax.set_ylabel("Wind RMSE, m/s")
 

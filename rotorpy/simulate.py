@@ -7,7 +7,7 @@ import torch
 from numpy.linalg import norm
 from scipy.spatial.transform import Rotation
 from time import perf_counter
- 
+
 import rotorpy.wind
 from rotorpy.controllers.quadrotor_control import BatchedSE3Control
 from rotorpy.vehicles.multirotor import BatchedMultirotor
@@ -29,12 +29,12 @@ def simulate(world, initial_state, vehicle, controller, trajectory, wind_profile
     Perform a vehicle simulation and return the numerical results.
 
     Inputs:
-        world, a class representing the world it is flying in, including objects and world bounds. 
+        world, a class representing the world it is flying in, including objects and world bounds.
         initial_state, a dict defining the vehicle initial conditions with appropriate keys
         vehicle, Vehicle object containing the dynamics
         controller, Controller object containing the controller
         trajectory, Trajectory object containing the trajectory to follow
-        wind_profile, Wind Profile object containing the wind generator. 
+        wind_profile, Wind Profile object containing the wind generator.
         t_final, maximum duration of simulation, s
         t_step, the time between each step in the simulator, s
         safety_margin, the radius of the ball surrounding the vehicle position to determine if a collision occurs
@@ -44,7 +44,7 @@ def simulate(world, initial_state, vehicle, controller, trajectory, wind_profile
             the location of trajectory with t=inf. If False, never terminate
             before timeout or error. If a function, terminate when returns not
             None.
-        mocap, a MotionCapture object that provides noisy measurements of pose and twist with artifacts. 
+        mocap, a MotionCapture object that provides noisy measurements of pose and twist with artifacts.
         use_mocap, a boolean to determine in noisy measurements from mocap should be used for quadrotor control
         estimator, an estimator object that provides estimates of a portion or all of the vehicle state.
 
@@ -75,11 +75,11 @@ def simulate(world, initial_state, vehicle, controller, trajectory, wind_profile
         imu_gt, a dict containing the ground truth (no noise, no bias) measurements from an accelerometer and gyroscope
             accel,  accelerometer, m/s**2
             gyro,   gyroscope, rad/s
-        mocap_measurements, a dict containing noisy measurements of pose and twist for the vehicle. 
+        mocap_measurements, a dict containing noisy measurements of pose and twist for the vehicle.
             x, position (inertial)
             v, velocity (inertial)
             q, orientation of body w.r.t. inertial frame.
-            w, body rates in the body frame. 
+            w, body rates in the body frame.
         exit_status, an ExitStatus enum indicating the reason for termination.
     """
 
@@ -95,7 +95,7 @@ def simulate(world, initial_state, vehicle, controller, trajectory, wind_profile
 
     time    = [0]
     state   = [copy.deepcopy(initial_state)]
-    state[0]['wind'] = wind_profile.update(0, state[0]['x'])   # TODO: move this line elsewhere so that other objects that don't have wind as a state can work here. 
+    state[0]['wind'] = wind_profile.update(0, state[0]['x'])   # TODO: move this line elsewhere so that other objects that don't have wind as a state can work here.
     imu_measurements = []
     mocap_measurements = []
     imu_gt = []
@@ -103,7 +103,7 @@ def simulate(world, initial_state, vehicle, controller, trajectory, wind_profile
     flat    = [trajectory.update(time[-1])]
     mocap_measurements.append(mocap.measurement(state[-1], with_noise=True, with_artifacts=False))
     if use_mocap:
-        # In this case the controller will use the motion capture estimate of the pose and twist for control. 
+        # In this case the controller will use the motion capture estimate of the pose and twist for control.
         control = [controller.update(time[-1], mocap_measurements[-1], flat[-1])]
     else:
         control = [controller.update(time[-1], state[-1], flat[-1])]
@@ -113,7 +113,6 @@ def simulate(world, initial_state, vehicle, controller, trajectory, wind_profile
     state_estimate.append(estimator.step(state[0], control[0], imu_measurements[0], mocap_measurements[0]))
 
     exit_status = None
-
     while True:
         step_start_time = perf_counter()
         exit_status = exit_status or safety_exit(world, safety_margin, state[-1], flat[-1], control[-1])
@@ -140,7 +139,7 @@ def simulate(world, initial_state, vehicle, controller, trajectory, wind_profile
         if print_fps:
             print(f"FPS is {fps}")
 
-    time    = np.array(time, dtype=float)    
+    time    = np.array(time, dtype=float)
     state   = merge_dicts(state)
     imu_measurements = merge_dicts(imu_measurements)
     imu_gt = merge_dicts(imu_gt)
@@ -216,7 +215,7 @@ def safety_exit(world, margin, state, flat, control):
         return ExitStatus.OVER_SPIN
 
     if len(world.world.get('blocks', [])) > 0:
-        # If a world has objects in it we need to check for collisions.  
+        # If a world has objects in it we need to check for collisions.
         collision_pts = world.path_collisions(state['x'], margin)
         no_collision = collision_pts.size == 0
         if not no_collision:

@@ -33,7 +33,7 @@ from stable_baselines3.common.callbacks import EvalCallback, CheckpointCallback,
 # The control abstraction we will use is cmd_ctatt, for which the actions are thrusts and commanded attitude
 control_mode = "cmd_ctatt"
 
-# We will use 512 parallel environments 
+# We will use 512 parallel environments
 num_envs = 512
 
 device = torch.device("cpu")

@@ -5,19 +5,19 @@ import math
 import random
 
 """
-Below are some default wind objects that might be useful inputs to the system.  
+Below are some default wind objects that might be useful inputs to the system.
 """
 
 class NoWind(object):
     """
-    This wind profile is the trivial case of no wind. It will output 
-    zero wind speed on all axes for all time. 
-    Alternatively, you can use ConstantWind with wx=wy=wz=0. 
+    This wind profile is the trivial case of no wind. It will output
+    zero wind speed on all axes for all time.
+    Alternatively, you can use ConstantWind with wx=wy=wz=0.
     """
 
     def __init__(self):
         """
-        Inputs: 
+        Inputs:
             Nothing
         """
         self.wind = np.array([0, 0, 0])
@@ -25,8 +25,8 @@ class NoWind(object):
     def update(self, t, position):
         """
         Given the present time and position of the multirotor, return the
-        current wind speed on all three axes. 
-        
+        current wind speed on all three axes.
+
         The wind should be expressed in the world coordinates.
         """
         return self.wind
@@ -43,8 +43,8 @@ class BatchedNoWind(object):
 
 class ConstantWind(object):
     """
-    This wind profile is constant both spatially and temporally. 
-    Wind speed is specified on each axis. 
+    This wind profile is constant both spatially and temporally.
+    Wind speed is specified on each axis.
     """
 
     def __init__(self, wx, wy, wz):
@@ -52,13 +52,13 @@ class ConstantWind(object):
         """
         self.wind = np.array([wx, wy, wz])
 
-        
+
     def update(self, t, position):
         """
         Given the present time and position of the multirotor, return the
-        current wind speed on all three axes. 
-        
-        The wind should be expressed in the world coordinates. 
+        current wind speed on all three axes.
+
+        The wind should be expressed in the world coordinates.
         """
 
         return self.wind
@@ -81,7 +81,7 @@ class SinusoidWind(object):
 
     def __init__(self, amplitudes=np.array([1,1,1]), frequencies=np.array([1,1,1]), phase=np.array([0,0,0])):
         """
-        Inputs: 
+        Inputs:
             amplitudes := array of amplitudes on each axis
             frequencies := array of frequencies for the wind pattern on each axis
             phase := relative phase offset on each axis in seconds
@@ -93,9 +93,9 @@ class SinusoidWind(object):
     def update(self, t, position):
         """
         Given the present time and position of the multirotor, return the
-        current wind speed on all three axes. 
-        
-        The wind should be expressed in the world coordinates. 
+        current wind speed on all three axes.
+
+        The wind should be expressed in the world coordinates.
         """
 
         wind = np.array([self.Ax*np.sin(2*np.pi*self.fx*(t+self.px)),
@@ -136,7 +136,7 @@ class BatchedSinusoidWind(object):
 
 class LadderWind(object):
     """
-    The wind will step up and down between a minimum and maximum speed for a specified duration. 
+    The wind will step up and down between a minimum and maximum speed for a specified duration.
     Visualized below...
 
                      | | <- duration
@@ -145,9 +145,9 @@ class LadderWind(object):
                ---         ---
      min -> ---         ---
             --------------------------> t
-    
-    ** Normally the wind will start at min and increase sequentially, but if the random flag is set true, 
-       the wind will step to a random sublevel after each duration is up. 
+
+    ** Normally the wind will start at min and increase sequentially, but if the random flag is set true,
+       the wind will step to a random sublevel after each duration is up.
 
     """
 
@@ -197,13 +197,13 @@ class LadderWind(object):
     def update(self, t, position):
         """
         Given the present time and position of the multirotor, return the
-        current wind speed on all three axes. 
-        
-        The wind should be expressed in the world coordinates. 
+        current wind speed on all three axes.
+
+        The wind should be expressed in the world coordinates.
         """
         if self.timerx is None:
             self.timerx, self.timery, self.timerz = t, t, t
-        
+
         if (t - self.timerx) >= self.durx:
             if self.random_flag:
                 self.xid = np.random.choice(self.nx)

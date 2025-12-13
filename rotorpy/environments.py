@@ -14,21 +14,21 @@ import os
 
 class Environment():
     """
-    Sandbox represents an instance of the simulation environment containing a unique vehicle, 
-    controller, trajectory generator, wind profile. 
+    Sandbox represents an instance of the simulation environment containing a unique vehicle,
+    controller, trajectory generator, wind profile.
 
     """
 
-    def __init__(self, vehicle,                 # vehicle object, must be specified. 
+    def __init__(self, vehicle,                 # vehicle object, must be specified.
                        controller,              # controller object, must be specified.
                        trajectory,              # trajectory object, must be specified.
-                       wind_profile = None,     # wind profile object, if none is supplied it will choose no wind. 
+                       wind_profile = None,     # wind profile object, if none is supplied it will choose no wind.
                        imu = None,              # imu sensor object, if none is supplied it will choose a default IMU sensor.
                        mocap = None,            # mocap sensor object, if none is supplied it will choose a default mocap.
                        world        = None,     # The world object
                        estimator    = None,     # estimator object
                        sim_rate     = 100,      # The update frequency of the simulator in Hz
-                       safety_margin = 0.25,    # The radius of the safety region around the robot. 
+                       safety_margin = 0.25,    # The radius of the safety region around the robot.
                        ):
 
         self.sim_rate = sim_rate
@@ -40,21 +40,21 @@ class Environment():
 
         if world is None:
             # If no world is specified, assume that it means that the intended world is free space.
-            wbound = 3 
-            self.world = World.empty((-wbound, wbound, -wbound, 
+            wbound = 3
+            self.world = World.empty((-wbound, wbound, -wbound,
                                        wbound, -wbound, wbound))
         else:
             self.world = world
 
         if wind_profile is None:
-            # If wind is not specified, default to no wind. 
+            # If wind is not specified, default to no wind.
             from rotorpy.wind.default_winds import NoWind
             self.wind_profile = NoWind()
         else:
             self.wind_profile = wind_profile
-        
+
         if imu is None:
-            # In the event of specified IMU, default to 0 bias with white noise with default parameters as specified below. 
+            # In the event of specified IMU, default to 0 bias with white noise with default parameters as specified below.
             from rotorpy.sensors.imu import Imu
             self.imu = Imu(p_BS = np.zeros(3,),
                            R_BS = np.eye(3),
@@ -63,11 +63,11 @@ class Environment():
             self.imu = imu
 
         if mocap is None:
-            # If no mocap is specified, set a default mocap. 
-            # Default motion capture properties. Pretty much made up based on qualitative comparison with real data from Vicon. 
-            mocap_params = {'pos_noise_density': 0.0005*np.ones((3,)),  # noise density for position 
+            # If no mocap is specified, set a default mocap.
+            # Default motion capture properties. Pretty much made up based on qualitative comparison with real data from Vicon.
+            mocap_params = {'pos_noise_density': 0.0005*np.ones((3,)),  # noise density for position
                     'vel_noise_density': 0.0010*np.ones((3,)),          # noise density for velocity
-                    'att_noise_density': 0.0005*np.ones((3,)),          # noise density for attitude 
+                    'att_noise_density': 0.0005*np.ones((3,)),          # noise density for attitude
                     'rate_noise_density': 0.0005*np.ones((3,)),         # noise density for body rates
                     'vel_artifact_max': 5,                              # maximum magnitude of the artifact in velocity (m/s)
                     'vel_artifact_prob': 0.001,                         # probability that an artifact will occur for a given velocity measurement
@@ -80,25 +80,25 @@ class Environment():
             self.mocap = mocap
 
         if estimator is None:
-            # In the likely case where an estimator is not supplied, default to the null state estimator. 
+            # In the likely case where an estimator is not supplied, default to the null state estimator.
             from rotorpy.estimators.nullestimator import NullEstimator
             self.estimator = NullEstimator()
         else:
             self.estimator = estimator
 
-        return 
+        return
 
     def run(self,   t_final      = 10,       # The maximum duration of the environment in seconds
                     use_mocap    = False,    # boolean determines if the controller should use
                     terminate    = False,
-                    plot            = False,    # Boolean: plots the vehicle states and commands   
+                    plot            = False,    # Boolean: plots the vehicle states and commands
                     plot_mocap      = True,     # Boolean: plots the motion capture pose and twist measurements
                     plot_estimator  = True,     # Boolean: plots the estimator filter states and covariance diagonal elements
                     plot_imu        = True,     # Boolean: plots the IMU measurements
-                    animate_bool    = False,    # Boolean: determines if the animation of vehicle state will play. 
+                    animate_bool    = False,    # Boolean: determines if the animation of vehicle state will play.
                     animate_wind    = False,    # Boolean: determines if the animation will include a wind vector.
-                    verbose         = False,    # Boolean: will print statistics regarding the simulation. 
-                    fname   = None      # Filename is specified if you want to save the animation. Default location is the home directory. 
+                    verbose         = False,    # Boolean: will print statistics regarding the simulation.
+                    fname   = None      # Filename is specified if you want to save the animation. Default location is the home directory.
                     ):
 
         """
@@ -143,7 +143,7 @@ class Environment():
                 fname = fname.replace(".gif", "")
             if ".mp4" in fname:
                 fname = fname.replace(".mp4", "")
-                
+
         if animate_bool:
             # Do animation here
             visualizer.animate_results(fname=fname, animate_wind=animate_wind)
@@ -154,10 +154,10 @@ class Environment():
                 plt.show()
 
         return self.result
-    
+
     def save_to_csv(self, savepath=None):
         """
-        Save the simulation data in self.results to a file. 
+        Save the simulation data in self.results to a file.
         """
 
         if savepath is None:
@@ -185,5 +185,5 @@ if __name__=="__main__":
                       trajectory=HoverTraj(),
                       sim_rate=100
                       )
-    
+
     result = sim.run(t_final=1, plot=True)

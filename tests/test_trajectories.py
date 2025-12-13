@@ -1,5 +1,5 @@
 '''
-Test the trajectory module. 
+Test the trajectory module.
 '''
 
 import inspect
@@ -42,7 +42,7 @@ def check_update_signature(class_obj):
     # Check if the parameter names match
     assert params == EXPECTED_UPDATE_SIGNATURE['args'], f"Expected arguments {EXPECTED_UPDATE_SIGNATURE['args']} for {class_obj.__name__}, but got {params}"
 
-# Test case to check all trajectories adhere to input requirement. 
+# Test case to check all trajectories adhere to input requirement.
 def test_trajectories_update_method():
 
     # Import all trajectories from the trajectories module
@@ -65,23 +65,23 @@ def test_trajectories_update_method():
         if hasattr(traj_class[1], 'update'):  # Check only classes with an 'update' method
             check_update_signature(traj_class[1])
 
-# Test MinSnap trajectory class. 
+# Test MinSnap trajectory class.
 def test_minsnap_traj():
     from rotorpy.trajectories.minsnap import MinSnap
 
     print("\nTesting MinSnap class input and output signatures")
     # Create an instance of the MinSnap class
-    min_snap = MinSnap(points=np.array([[0, 0, 0], [1, 2, 4], [3, 5, 2]]), 
-                       yaw_angles=np.array([0, np.pi/4, np.pi/2]), 
-                       yaw_rate_max=2*np.pi, 
-                       poly_degree=7, 
-                       yaw_poly_degree=7, 
-                       v_max=3, 
-                       v_avg=1, 
-                       v_start=[0, 0, 0], 
-                       v_end=[0, 0, 0], 
+    min_snap = MinSnap(points=np.array([[0, 0, 0], [1, 2, 4], [3, 5, 2]]),
+                       yaw_angles=np.array([0, np.pi/4, np.pi/2]),
+                       yaw_rate_max=2*np.pi,
+                       poly_degree=7,
+                       yaw_poly_degree=7,
+                       v_max=3,
+                       v_avg=1,
+                       v_start=[0, 0, 0],
+                       v_end=[0, 0, 0],
                        verbose=True)
-    
+
     return_value = min_snap.update(0.0)
     assert isinstance(return_value, dict), "update() method should return a dictionary"
 

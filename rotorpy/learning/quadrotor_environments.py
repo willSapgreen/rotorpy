@@ -21,7 +21,7 @@ from gymnasium import spaces
 from copy import deepcopy
 
 DEFAULT_RESET_OPTIONS = {'initial_states': 'random', 'pos_bound': 2, 'vel_bound': 0,
-                         "params": "fixed", 
+                         "params": "fixed",
                          "randomization_ranges": crazyflie_randomizations}
 
 def _minmax_scale(x, min_values, max_values):
@@ -74,9 +74,9 @@ class QuadrotorEnv(VecEnv):
                  num_envs,                              # Number of quadrotor environments to spawn.
                  initial_states,                        # The initial states of the drones.
                  control_mode = 'cmd_vel',              # Control abstraction, see metadata["control_modes"] for a list.
-                 reward_fn = vec_hover_reward,          # Reward function, must output the same dim as the number of drones. 
-                 quad_params = crazyflie_params,        # Vehicle params for the quadrotor environment. Can be BatchedMultirotorParams. 
-                 device = torch.device('cpu'),          # Device to load environment onto. 
+                 reward_fn = vec_hover_reward,          # Reward function, must output the same dim as the number of drones.
+                 quad_params = crazyflie_params,        # Vehicle params for the quadrotor environment. Can be BatchedMultirotorParams.
+                 device = torch.device('cpu'),          # Device to load environment onto.
                  max_time = 10,                         # Maximum time to run the simulation for in a single session.
                  wind_profile = None,                   # wind profile object, if none is supplied it will choose no wind.
                  world        = None,                   # The world object
@@ -96,20 +96,20 @@ class QuadrotorEnv(VecEnv):
         # Number of environments to render when render is called.
         self.num_quads_to_render = self.metadata['num_quads_to_render']
 
-        # Initial state is a dict of initial states for the quadrotor. Assert that all the keys are present and that they have the right shape. 
+        # Initial state is a dict of initial states for the quadrotor. Assert that all the keys are present and that they have the right shape.
         assert all(key in initial_states for key in ('x', 'v', 'q', 'w', 'wind', 'rotor_speeds'))
         for key in initial_states.keys():
-            if not isinstance(initial_states[key], torch.Tensor): # Ensure each element is a tensor. 
+            if not isinstance(initial_states[key], torch.Tensor): # Ensure each element is a tensor.
                 initial_states[key] = torch.from_numpy(initial_states[key])
-            if initial_states[key].ndim == 1: # Add batch dimension if missing. 
+            if initial_states[key].ndim == 1: # Add batch dimension if missing.
                 initial_states[key] = initial_states[key].unsqueeze(0)
             initial_states[key] = initial_states[key].to(device)
 
         self.initial_states = deepcopy(initial_states)
         self.vehicle_states = deepcopy(initial_states)
 
-        # Construct BatchedMultirotorParams from quad_params. 
-        if type(quad_params) == dict: # if only one quadrotor param config is given, convert it to BatchedMultirotorParams for legacy support. 
+        # Construct BatchedMultirotorParams from quad_params.
+        if type(quad_params) == dict: # if only one quadrotor param config is given, convert it to BatchedMultirotorParams for legacy support.
             self.quad_params = BatchedMultirotorParams([quad_params for _ in range(num_envs)], num_envs, device=self.device)
         elif isinstance(quad_params, BatchedMultirotorParams):
             self.quad_params = quad_params
@@ -142,7 +142,7 @@ class QuadrotorEnv(VecEnv):
         else:
             self.action_space = spaces.Box(low = -1, high = 1, shape = (4,), dtype=np.float32)
 
-        # Get the minimum and maximum rotor speeds directly from quad_params. 
+        # Get the minimum and maximum rotor speeds directly from quad_params.
         self.rotor_speed_max = self.quad_params.rotor_speed_max.cpu().numpy()
         self.rotor_speed_min = self.quad_params.rotor_speed_min.cpu().numpy()
 
@@ -157,7 +157,7 @@ class QuadrotorEnv(VecEnv):
 
         # Set the maximum body rate on each axis (this is hand selected), rad/s
         self.max_roll_br = 7.0
-        self.max_pitch_br = 7.0 
+        self.max_pitch_br = 7.0
         self.max_yaw_br = 3.0
 
         self.max_vel = 4/np.sqrt(4)   # Selected so that at most the max speed is 4 m/s
@@ -182,7 +182,7 @@ class QuadrotorEnv(VecEnv):
         else:
             self.wind_profile = wind_profile
 
-        if render_mode == '3D': 
+        if render_mode == '3D':
             warnings.warn("3D Rendering in Vectorized Environment behaves strangely during training.")
             if fig is None and ax is None:
                 self.fig = plt.figure('Visualization')
@@ -209,10 +209,10 @@ class QuadrotorEnv(VecEnv):
         pass
 
     def reset_idx(self, env_idx, options):
-        """ 
-        Resets the i'th quadrotor in the environment. 
-        """ 
-        
+        """
+        Resets the i'th quadrotor in the environment.
+        """
+
         if options['initial_states'] == 'random':
             pos = torch.rand(3, device=self.device, dtype=torch.float64) * 2 * options['pos_bound'] - options['pos_bound']
             vel = torch.rand(3, device=self.device, dtype=torch.float64) * 2 * options['vel_bound'] - options['vel_bound']
@@ -318,9 +318,9 @@ class QuadrotorEnv(VecEnv):
 
     def step(self, action):
         """
-        Step the quadrotor dynamics forward by one step based on the policy action. 
+        Step the quadrotor dynamics forward by one step based on the policy action.
         Inputs:
-            action: The action is a 4x1 vector which depends on the control abstraction: 
+            action: The action is a 4x1 vector which depends on the control abstraction:
 
             if control_mode == 'cmd_vel':
                 action[0] (-1,1) := commanded velocity in x direction (will be rescaled to m/s)
@@ -500,7 +500,7 @@ class QuadrotorEnv(VecEnv):
                 self._print_quad(env_idx)
 
     def _print_quad(self, env_idx):
-        # Print the first quadrotor. 
+        # Print the first quadrotor.
         print("env_idx: %d Time: %3.2f \t Position: (%3.2f, %3.2f, %3.2f) \t Reward: %3.2f" % (env_idx,
             self.t[env_idx], self.vehicle_states['x'][env_idx][0], self.vehicle_states['x'][env_idx][1], self.vehicle_states['x'][env_idx][2], self.reward[env_idx]))
 
@@ -525,7 +525,7 @@ class QuadrotorEnv(VecEnv):
         plt.pause(1e-9)
 
         return
-        
+
     # Methods to comply with Stable Baselines API
     def set_attr(self, attr_name, value, indices = None):
         pass

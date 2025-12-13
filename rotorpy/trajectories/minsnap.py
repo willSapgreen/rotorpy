@@ -9,8 +9,8 @@ import torch
 
 def cvxopt_solve_qp(P, q, G=None, h=None, A=None, b=None):
     """
-    From https://scaron.info/blog/quadratic-programming-in-python.html . Infrastructure code for solving quadratic programs using CVXOPT. 
-    The structure of the program is as follows: 
+    From https://scaron.info/blog/quadratic-programming-in-python.html . Infrastructure code for solving quadratic programs using CVXOPT.
+    The structure of the program is as follows:
 
     min 0.5 xT P x + qT x
     s.t. Gx <= h
@@ -41,15 +41,15 @@ def H_fun(dt, k=7):
     Computes the cost matrix for a single segment in a single dimension.
     *** Assumes that the decision variables c_i are e.g. x(t) = c_0 + c_1*t + c_2*t^2 + c_3*t^3 + c_4*t^4 + c_5*t^5 + .. + c_k*t^k
     Inputs:
-        dt, scalar, the duration of the segment (t_(i+1) - t_i) 
-        k, scalar, the order of the polynomial. 
+        dt, scalar, the duration of the segment (t_(i+1) - t_i)
+        k, scalar, the order of the polynomial.
     Outputs:
         H, numpy array, matrix containing the min snap cost function for that segment. Assumes the polynomial is at least order 5.
     """
 
     H = np.zeros((k+1,k+1))
 
-    # TODO: implement automatic cost function based on the desired cost functional (snap or jerk) and the order of the polynomial, k. 
+    # TODO: implement automatic cost function based on the desired cost functional (snap or jerk) and the order of the polynomial, k.
 
     seventh_order_cost = np.array([[576*dt, 1440*dt**2, 2880*dt**3, 5040*dt**4],
                                    [1440*dt**2, 4800*dt**3, 10800*dt**4, 20160*dt**5],
@@ -61,14 +61,14 @@ def H_fun(dt, k=7):
 
     H[4:(k+1),4:(k+1)] = cost
 
-    return H 
+    return H
 
 def get_1d_constraints(keyframes, delta_t, m, k=7, vmax=5, vstart=0, vend=0):
     """
-    Computes the constraint matrices for the min snap problem. 
+    Computes the constraint matrices for the min snap problem.
     *** Assumes that the decision variables c_i are e.g. o(t) = c_0 + c_1*t + c_2*t^2 + ... c_(k)*t^(k)
 
-    We impose the following constraints FOR EACH SEGMENT m: 
+    We impose the following constraints FOR EACH SEGMENT m:
         1) x_m(0) = keyframe[i]             # position at t = 0
         2) x_m(dt) = keyframe[i+1]          # position at t = dt
         3) v_m(0) = v_start                 # velocity at t = 0
@@ -79,7 +79,7 @@ def get_1d_constraints(keyframes, delta_t, m, k=7, vmax=5, vstart=0, vend=0):
         8) s_m(dt) = s_(m+1)(0)             # snap continuity for interior segments
         9) v_m(dt/2) <= vmax                # velocity constraint at midpoint of each segment
 
-    For the first and last segment we impose: 
+    For the first and last segment we impose:
         1) a_0(0) = 0                       # acceleration at start of the trajectory is 0
         2) j_0(0) = 0                       # jerk at start of the trajectory is 0
         3) a_N(dt) = 0                      # acceleration at the end of the trajectory is 0
@@ -87,16 +87,16 @@ def get_1d_constraints(keyframes, delta_t, m, k=7, vmax=5, vstart=0, vend=0):
 
     Inputs:
         keyframes, numpy array, a list of m waypoints IN ONE DIMENSION (x,y,z, or yaw)
-        delta_t, numpy array, the times between keyframes computed apriori. 
+        delta_t, numpy array, the times between keyframes computed apriori.
         m, int, the number of segments.
-        k, int, the degree of the polynomial. 
-        vmax, float, max speeds imposed at the midpoint of each segment. 
-        vstart, float, the starting speed of the quadrotor. 
-        vend, float, the ending speed of the quadrotor. 
+        k, int, the degree of the polynomial.
+        vmax, float, max speeds imposed at the midpoint of each segment.
+        vstart, float, the starting speed of the quadrotor.
+        vend, float, the ending speed of the quadrotor.
     Outputs:
-        A, numpy array, matrix of equality constraints (left side). 
+        A, numpy array, matrix of equality constraints (left side).
         b, numpy array, array of equality constraints (right side).
-        G, numpy array, matrix of inequality constraints (left side). 
+        G, numpy array, matrix of inequality constraints (left side).
         h, numpy array, array of inequality constraints (right side).
 
     """
@@ -131,7 +131,7 @@ def get_1d_constraints(keyframes, delta_t, m, k=7, vmax=5, vstart=0, vend=0):
             A.append([0]*(k+1)*i + [0]*4 + [-(j-3)*(j-2)*(j-1)*j*dt**(j-4) for j in range(4, k+1)] + [0]*4 + [(j-3)*(j-2)*(j-1)*j*(0)**(j-4) for j in range(4, k+1)] + [0]*(k+1)*(m-i-2))  # Snap
             b.append(0)
 
-        # Inequality constraints 
+        # Inequality constraints
         G.append([0]*(k+1)*i + [0] + [j*(0.5*dt)**(j-1) for j in range(1, k+1)] + [0]*(k+1)*(m-i-1))  # Velocity constraint at midpoint
         h.append(vmax)
 
@@ -148,7 +148,7 @@ def get_1d_constraints(keyframes, delta_t, m, k=7, vmax=5, vstart=0, vend=0):
     A.append([0]*(k+1)*(m-1) + [0]*3 + [(j-2)*(j-1)*j*(dt)**(j-3) for j in range(3, k+1)])       # Jerk = 0 at end
     b.append(0)
 
-    # Convert to numpy arrays and ensure floats to work with cvxopt. 
+    # Convert to numpy arrays and ensure floats to work with cvxopt.
     A = np.array(A).astype(float)
     b = np.array(b).astype(float)
     G = np.array(G).astype(float)
@@ -158,23 +158,23 @@ def get_1d_constraints(keyframes, delta_t, m, k=7, vmax=5, vstart=0, vend=0):
 
 class MinSnap(object):
     """
-    MinSnap generates a minimum snap trajectory for the quadrotor, following https://ieeexplore.ieee.org/document/5980409. 
-    The trajectory is a piecewise 7th order polynomial (minimum degree necessary for snap optimality). 
+    MinSnap generates a minimum snap trajectory for the quadrotor, following https://ieeexplore.ieee.org/document/5980409.
+    The trajectory is a piecewise 7th order polynomial (minimum degree necessary for snap optimality).
     """
-    def __init__(self, points, yaw_angles=None, yaw_rate_max=2*np.pi, 
+    def __init__(self, points, yaw_angles=None, yaw_rate_max=2*np.pi,
                 poly_degree=7, yaw_poly_degree=7,
                 v_max=3, v_avg=1, v_start=[0, 0, 0], v_end=[0, 0, 0],
                 verbose=True):
         """
-        Waypoints and yaw angles compose the "keyframes" for optimizing over. 
+        Waypoints and yaw angles compose the "keyframes" for optimizing over.
         Inputs:
-            points, numpy array of m 3D waypoints. 
-            yaw_angles, numpy array of m yaw angles corresponding to each waypoint. 
+            points, numpy array of m 3D waypoints.
+            yaw_angles, numpy array of m yaw angles corresponding to each waypoint.
             yaw_rate_max, the maximum yaw rate in rad/s
-            v_avg, the average speed between waypoints, this is used to do the time allocation as well as impose constraints at midpoint of each segment. 
+            v_avg, the average speed between waypoints, this is used to do the time allocation as well as impose constraints at midpoint of each segment.
             v_start, the starting velocity vector given as an array [x_dot_start, y_dot_start, z_dot_start]
             v_end, the ending velocity vector given as an array [x_dot_end, y_dot_end, z_dot_end]
-            verbose, determines whether or not the QP solver will output information. 
+            verbose, determines whether or not the QP solver will output information.
         """
 
         if poly_degree != 7 or yaw_poly_degree != 7:
@@ -204,16 +204,16 @@ class MinSnap(object):
         self.x_ddddot_poly = np.zeros((m, 3, poly_degree-3))
         self.yaw_dot_poly = np.zeros((m, 1, yaw_poly_degree))
         self.yaw_ddot_poly = np.zeros((m, 1, yaw_poly_degree-1))
-        
+
         # If two or more waypoints remain, solve min snap
         if self.points.shape[0] >= 2:
 
             ################## Time allocation
             self.delta_t = seg_dist/self.v_avg # Compute the segment durations based on the average velocity
-            self.t_keyframes = np.concatenate(([0], np.cumsum(self.delta_t)))  # Construct time array which indicates when the quad should be at the i'th waypoint. 
+            self.t_keyframes = np.concatenate(([0], np.cumsum(self.delta_t)))  # Construct time array which indicates when the quad should be at the i'th waypoint.
 
             ################## Cost function
-            # First get the cost segment for each matrix: 
+            # First get the cost segment for each matrix:
             H_pos = [H_fun(self.delta_t[i], k=poly_degree) for i in range(m)]
             H_yaw = [H_fun(self.delta_t[i], k=yaw_poly_degree) for i in range(m)]
 
@@ -224,7 +224,7 @@ class MinSnap(object):
             # Lastly the linear term in the cost function is 0
             q_pos = np.zeros(((poly_degree+1)*m,1))
             q_yaw = np.zeros(((yaw_poly_degree+1)*m, 1))
-            
+
             ################## Constraints for each axis
             (Ax,bx,Gx,hx) = get_1d_constraints(self.points[:,0], self.delta_t, m, k=poly_degree, vmax=v_max, vstart=v_start[0], vend=v_end[0])
             (Ay,by,Gy,hy) = get_1d_constraints(self.points[:,1], self.delta_t, m, k=poly_degree, vmax=v_max, vstart=v_start[1], vend=v_end[1])
@@ -239,7 +239,7 @@ class MinSnap(object):
             # c_opt_z = np.linalg.solve(Az,bz)
             # c_opt_yaw = np.linalg.solve(Ayaw,byaw)
 
-            ### Otherwise, in the underconstrained case or when inequality constraints are given we solve the QP. 
+            ### Otherwise, in the underconstrained case or when inequality constraints are given we solve the QP.
             c_opt_x = cvxopt_solve_qp(P_pos, q=q_pos, G=Gx, h=hx, A=Ax, b=bx)
             c_opt_y = cvxopt_solve_qp(P_pos, q=q_pos, G=Gy, h=hy, A=Ay, b=by)
             c_opt_z = cvxopt_solve_qp(P_pos, q=q_pos, G=Gz, h=hz, A=Az, b=bz)
@@ -264,7 +264,7 @@ class MinSnap(object):
                 self.yaw_ddot_poly[i,0,:] = np.polyder(self.yaw_poly[i,0,:], m=2)
 
         else:
-            # Otherwise, there is only one waypoint so we just set everything = 0. 
+            # Otherwise, there is only one waypoint so we just set everything = 0.
             self.null = True
             m = 1
             self.T = np.zeros((m,))
@@ -384,7 +384,7 @@ class BatchedMinSnap:
         '''
         Evaluates trajectory [i] at time t[i], and returns the flat_outputs in the same format as RotorPy.
         Outputs:
-            flat_output, a dict describing the present desired flat outputs with same keys as `MinSnap`. Entries in the dictionary are 
+            flat_output, a dict describing the present desired flat outputs with same keys as `MinSnap`. Entries in the dictionary are
                 torch tensors of shape (num_trajs, 3) for x, x_dot, x_ddot, and (num_trajs,) for yaw and yaw_dot.
         '''
         segment_idxs = torch.zeros(self.num_trajs).int()

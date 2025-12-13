@@ -5,22 +5,22 @@ import copy
 
 class WindEKF:
     """
-    Wind EKF: 
-        Given approximate dynamics near level flight, the wind EKF will produce an estimate of the local wind vector acting on the body. 
-        It requires knowledge of the effective drag coefficient on each axis, which would be determined either from real flight or computed in simulation, and the mass of the vehicle. 
-        The inputs to the filter are the mass normalized collective thrust and the body rates on each axis. 
-        Measurements of body velocity, Euler angles, and acceleration are provided to the vehicle. 
-        The filter estimates the Euler angles, body velocities, and wind velocities. 
+    Wind EKF:
+        Given approximate dynamics near level flight, the wind EKF will produce an estimate of the local wind vector acting on the body.
+        It requires knowledge of the effective drag coefficient on each axis, which would be determined either from real flight or computed in simulation, and the mass of the vehicle.
+        The inputs to the filter are the mass normalized collective thrust and the body rates on each axis.
+        Measurements of body velocity, Euler angles, and acceleration are provided to the vehicle.
+        The filter estimates the Euler angles, body velocities, and wind velocities.
 
-        State space: 
+        State space:
             xhat = [phi, theta, psi, u, v, w, windx, windy, windz]
-        Input space: 
+        Input space:
             u = [T/m, p, q, r]
     """
 
     def __init__(self, quad_params, Q=np.diag(np.concatenate([0.5*np.ones(3),0.7*np.ones(3),0.1*np.ones(3)])),
-                                    R=np.diag(np.concatenate([0.0005*np.ones(3),0.0010*np.ones(3),np.sqrt(100/2)*(0.38**2)*np.ones(3)])), 
-                                    xhat0=np.array([0,0,0, 0.1,0.05,0.02, 1.5,1.5,1.5]), 
+                                    R=np.diag(np.concatenate([0.0005*np.ones(3),0.0010*np.ones(3),np.sqrt(100/2)*(0.38**2)*np.ones(3)])),
+                                    xhat0=np.array([0,0,0, 0.1,0.05,0.02, 1.5,1.5,1.5]),
                                     P0=1*np.eye(9),
                                     dt=1/100):
         """
@@ -53,7 +53,7 @@ class WindEKF:
 
         self.dt = dt
 
-        # Initialize the Jacobians at starting position and assuming hover thrust.  
+        # Initialize the Jacobians at starting position and assuming hover thrust.
         self.computeJacobians(self.xhat, np.array([self.g, 0, 0, 0]))
 
     def step(self, ground_truth_state, controller_command, imu_measurement, mocap_measurement):
@@ -69,8 +69,8 @@ class WindEKF:
         """
         Propagate occurs whenever an action u is taken.
         Inputs:
-            ground_truth_state, the ground truth state is mainly there if it's necessary to compute certain portions of the state, e.g., actual thrust produced by the rotors. 
-            controller_command, the controller command taken, this has to be converted to the appropriate control vector u depending on the filter model. 
+            ground_truth_state, the ground truth state is mainly there if it's necessary to compute certain portions of the state, e.g., actual thrust produced by the rotors.
+            controller_command, the controller command taken, this has to be converted to the appropriate control vector u depending on the filter model.
 
         Outputs:
             xhat, the current state estimate after propagation
@@ -91,14 +91,14 @@ class WindEKF:
 
     def update(self, ground_truth_state, controller_command, imu_measurement, mocap_measurement):
         """
-        Update the estimate based on new sensor measurments. 
+        Update the estimate based on new sensor measurments.
         Inputs:
-            ground_truth_state, the ground truth state is mainly there if it's necessary to compute certain portions of the state, e.g., actual thrust produced by the rotors. 
-            controller_command, the controller command taken, this has to be converted to the appropriate control vector u depending on the filter model. 
+            ground_truth_state, the ground truth state is mainly there if it's necessary to compute certain portions of the state, e.g., actual thrust produced by the rotors.
+            controller_command, the controller command taken, this has to be converted to the appropriate control vector u depending on the filter model.
             imu_measurement, contains measurements from an inertial measurement unit. These measurements are noisy, potentially biased, and potentially off-axis. The measurement
-                        is specific acceleration, i.e., total force minus gravity. 
-            mocap_measurement, provides noisy measurements of pose and twist. 
-        
+                        is specific acceleration, i.e., total force minus gravity.
+            mocap_measurement, provides noisy measurements of pose and twist.
+
         Outputs:
             xhat, the current state estimate after measurement update
             P, the current covariance matrix after measurement update
@@ -122,8 +122,8 @@ class WindEKF:
                        imu_measurement['accel'][1],     # body y acceleration
                        imu_measurement['accel'][2]      # body z acceleration
                        ])
-        
-        # First linearize the measurement model. 
+
+        # First linearize the measurement model.
         self.computeJacobians(self.xhat, uk)
 
         # Now compute the Kalman gain
@@ -143,13 +143,13 @@ class WindEKF:
 
         va = np.sqrt((xk[3]-xk[6])**2 + (xk[4]-xk[7])**2 + (xk[5]-xk[8])**2)  # Compute the norm of the airspeed vector
 
-        # The process model is integrated using forward Euler. 
-        xdot = np.array([uk[1] + xk[0]*xk[1]*uk[2] + xk[2]*uk[3], 
-                        uk[2] - xk[0]*uk[3], 
-                        xk[0]*uk[2] + uk[3], 
+        # The process model is integrated using forward Euler.
+        xdot = np.array([uk[1] + xk[0]*xk[1]*uk[2] + xk[2]*uk[3],
+                        uk[2] - xk[0]*uk[3],
+                        xk[0]*uk[2] + uk[3],
                         -self.c_Dx/self.mass*(xk[3]-xk[6])*va + self.g*xk[1] + xk[4]*uk[3] - xk[5]*uk[1],
-                        -self.c_Dy/self.mass*(xk[4]-xk[7])*va - self.g*xk[0] + xk[5]*uk[1] - xk[3]*uk[3], 
-                        uk[0] - self.c_Dz/self.mass*(xk[5]-xk[8])*va - self.g + xk[3]*uk[2] - xk[4]*uk[1], 
+                        -self.c_Dy/self.mass*(xk[4]-xk[7])*va - self.g*xk[0] + xk[5]*uk[1] - xk[3]*uk[3],
+                        uk[0] - self.c_Dz/self.mass*(xk[5]-xk[8])*va - self.g + xk[3]*uk[2] - xk[4]*uk[1],
                         0,
                         0,
                         0])
@@ -157,7 +157,7 @@ class WindEKF:
         xkp1 = xk + xdot*self.dt
 
         return xkp1
-    
+
     def measurement_model(self, xk, uk):
         """
         Measurement model
@@ -170,7 +170,7 @@ class WindEKF:
         h[0:3] = np.hstack((np.eye(3), np.zeros((3,6))))@(xk)
         h[3:6] = np.hstack((np.zeros((3,3)), np.eye(3), np.zeros((3,3))))@(xk)
 
-        h[6:] = np.array([-self.c_Dx/self.mass*(xk[3]-xk[6])*va, 
+        h[6:] = np.array([-self.c_Dx/self.mass*(xk[3]-xk[6])*va,
                           -self.c_Dy/self.mass*(xk[4]-xk[7])*va,
                           uk[0]-self.c_Dz/self.mass*(xk[5]-xk[8])*va])
 

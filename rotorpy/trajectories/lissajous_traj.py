@@ -2,14 +2,14 @@ import numpy as np
 import torch
 
 """
-Lissajous curves are defined by trigonometric functions parameterized in time. 
+Lissajous curves are defined by trigonometric functions parameterized in time.
 See https://en.wikipedia.org/wiki/Lissajous_curve
 
 """
 class TwoDLissajous(object):
     """
     The standard Lissajous on the XY curve as defined by https://en.wikipedia.org/wiki/Lissajous_curve
-    This is planar in the XY plane at a fixed height. 
+    This is planar in the XY plane at a fixed height.
     """
     def __init__(self, A=1, B=1, a=1, b=1, delta=0, x_offset=0, y_offset=0, height=0, yaw_bool=False):
         """
@@ -29,7 +29,7 @@ class TwoDLissajous(object):
         """
 
         self.A, self.B = A, B
-        self.a, self.b = a, b 
+        self.a, self.b = a, b
         self.delta = delta
         self.height = height
         self.x_offset = x_offset
@@ -83,9 +83,9 @@ class TwoDLissajous(object):
         return flat_output
 
 class BatchedTwoDLissajous(object):
-    """ 
+    """
     This is a batched version of the TwoDLissajous trajectory.
-    """ 
+    """
 
     def __init__(self, A_s, B_s, a_s, b_s, delta_s, x_offset_s, y_offset_s, height_s, yaw_bool_s, device='cpu'):
         """
@@ -115,7 +115,7 @@ class BatchedTwoDLissajous(object):
         self.num_uavs = len(A_s)
 
     def update(self, t):
-        """ 
+        """
         Given the present time, return the desired flat output and derivatives for each uav.
         """
 

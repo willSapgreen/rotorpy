@@ -11,12 +11,12 @@ def generate_random_vehicle_params(num_drones,
                                     device,
                                     nominal_params = cf_params,
                                     randomization_ranges = crazyflie_randomizations):
-    """ 
-    Generate random vehicle params. 
+    """
+    Generate random vehicle params.
     Inputs:
-        num_drones: the number of drones to generate params for. 
+        num_drones: the number of drones to generate params for.
         nominal_params: the nominal parameters for the drone, i.e. the center of each sampling distribution.
-        randomization_ranges: the range with which parameters are selected. 
+        randomization_ranges: the range with which parameters are selected.
     """
 
     batch_params = BatchedMultirotorParams([nominal_params for _ in range(num_drones)], num_drones, device)
@@ -30,10 +30,10 @@ def update_vehicle_params(idx,
                           ranges,
                           params_obj):
     """
-    Update vehicle parameters. 
+    Update vehicle parameters.
     Inputs:
-        idx: the particular idx of the drone. 
-        ranges: the range of values to sample from. 
+        idx: the particular idx of the drone.
+        ranges: the range of values to sample from.
         prams_obj: the object (type BatchedMultirotorParams) to modify.
 
     """
@@ -42,7 +42,7 @@ def update_vehicle_params(idx,
         mass_val = np.random.uniform(ranges["mass"][0], ranges["mass"][1])
         params_obj.update_mass(idx, mass_val)
 
-        # divide rotor speed max by 1.8 to give some margin to allow flight 
+        # divide rotor speed max by 1.8 to give some margin to allow flight
         min_k_eta = (mass_val * (params_obj.g / 4) / ((params_obj.rotor_speed_max[idx]/1.2) ** 2)).item()
     if "k_eta" in ranges or "k_m" in ranges or "rotor_pos" in ranges:
         k_eta = np.random.uniform(max(ranges["k_eta"][0], min_k_eta),
@@ -66,4 +66,4 @@ def update_vehicle_params(idx,
         motor_noise = np.random.uniform(ranges["motor_noise"][0], ranges["motor_noise"][1])
         params_obj.motor_noise[idx] = motor_noise
 
-    return 
+    return
