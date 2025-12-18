@@ -15,11 +15,11 @@ class Plotter():
 
     def __init__(self, results, world):
 
-        (self.time, self.x, self.x_des, self.v, 
-        self.v_des, self.q, self.q_des, self.w, 
+        (self.time, self.x, self.x_des, self.v,
+        self.v_des, self.q, self.q_des, self.w,
         self.s, self.s_des, self.M, self.T, self.wind,
         self.accel, self.gyro, self.accel_gt,
-        self.x_mc, self.v_mc, self.q_mc, self.w_mc, 
+        self.x_mc, self.v_mc, self.q_mc, self.w_mc,
         self.filter_state, self.covariance, self.sd) = self.unpack_results(results)
 
         self.R = Rotation.from_quat(self.q).as_matrix()
@@ -76,7 +76,7 @@ class Plotter():
         ax.set_xlabel('time, s')
         ax.grid('major')
 
-        if plot_mocap:  # if mocap should be plotted. 
+        if plot_mocap:  # if mocap should be plotted.
             # Motion capture position and velocity vs time
             (fig_mocapposvel, axes) = plt.subplots(nrows=2, ncols=1, sharex=True, num='Motion Capture Pos/Vel vs Time')
             ax = axes[0]
@@ -204,7 +204,7 @@ class Plotter():
     def animate_results(self, animate_wind, fname=None):
         """
         Animate the results
-        
+
         """
 
         # Animation (Slow)
@@ -266,25 +266,25 @@ class Plotter():
 
 def plot_map(ax, world_data, equal_aspect=True, color=None, edgecolor=None, alpha=1, world_bounds=True, axes=True):
     """
-    Plots the map in the world data in a top-down 2D view. 
+    Plots the map in the world data in a top-down 2D view.
     Inputs:
         ax: The axis to plot on
         world_data: The world data to plot
         equal_aspect: Determines if the aspect ratio of the plot should be equal.
-        color: The color of the buildings. If None (default), it will use the color of the buildings. 
+        color: The color of the buildings. If None (default), it will use the color of the buildings.
         edgecolor: The edge color of the buildings. If None (default), it will use the color of the buildings.
         alpha: The alpha value of the buildings. If None (default), it will use the color of the buildings.
-        world_bounds: Whether or not to plot the world bounds as a dashed line around the 2D plot. 
+        world_bounds: Whether or not to plot the world bounds as a dashed line around the 2D plot.
         axes: Whether or not to plot the axis labels
     Outputs:
-        Plots the map in the axis of interest. 
+        Plots the map in the axis of interest.
     """
     from matplotlib.patches import Rectangle
 
     # Add a dashed rectangle for the world bounds
     if world_bounds:
-        world_patch = Rectangle((world_data['bounds']['extents'][0], world_data['bounds']['extents'][2]), 
-                                world_data['bounds']['extents'][1]-world_data['bounds']['extents'][0], world_data['bounds']['extents'][3]-world_data['bounds']['extents'][2], 
+        world_patch = Rectangle((world_data['bounds']['extents'][0], world_data['bounds']['extents'][2]),
+                                world_data['bounds']['extents'][1]-world_data['bounds']['extents'][0], world_data['bounds']['extents'][3]-world_data['bounds']['extents'][2],
                                 linewidth=1, edgecolor='k', facecolor='none', linestyle='dashed')
         ax.add_patch(world_patch)
 
@@ -333,18 +333,18 @@ def plot_map(ax, world_data, equal_aspect=True, color=None, edgecolor=None, alph
 
 def plot_map(ax, world_data, equal_aspect=True, color=None, edgecolor=None, alpha=1, axes=True):
     """
-    Plots the map in the world data in a top-down 2D view. 
+    Plots the map in the world data in a top-down 2D view.
     Inputs:
         ax: The axis to plot on
         world_data: The world data to plot
         equal_aspect: Determines if the aspect ratio of the plot should be equal.
-        color: The color of the buildings. If None (default), it will use the color of the buildings. 
+        color: The color of the buildings. If None (default), it will use the color of the buildings.
         edgecolor: The edge color of the buildings. If None (default), it will use the color of the buildings.
         alpha: The alpha value of the buildings. If None (default), it will use the color of the buildings.
-        world_bounds: Whether or not to plot the world bounds as a dashed line around the 2D plot. 
+        world_bounds: Whether or not to plot the world bounds as a dashed line around the 2D plot.
         axes: Whether or not to plot the axis labels
     Outputs:
-        Plots the map in the axis of interest. 
+        Plots the map in the axis of interest.
     """
     from matplotlib.patches import Rectangle
 
@@ -401,14 +401,14 @@ if __name__ == "__main__":
 
     from rotorpy.world import World
 
-    # Get a list of the maps available under worlds. 
+    # Get a list of the maps available under worlds.
     available_worlds = [fname for fname in os.listdir(os.path.abspath(os.path.join(os.path.dirname(__file__),'..','worlds'))) if 'json' in fname]
 
     # Load a random world
     world_fname = np.random.choice(available_worlds)
     world = World.from_file(os.path.abspath(os.path.join(os.path.dirname(__file__),'..','worlds', world_fname)))
-    
-    # Plot the world. 
+
+    # Plot the world.
     (fig, ax) = plt.subplots(nrows=1, ncols=1, num="Top Down World View")
     plot_map(ax, world.world)
     ax.set_title(world_fname)

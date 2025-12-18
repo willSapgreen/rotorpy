@@ -19,7 +19,7 @@ from rotorpy.estimators.nullestimator import NullEstimator
 
 def main():
     # This prevents pytorch from spawning multiple threads. Commenting this line out can improve performance
-    # on CPU for larger batch sizes. But can also cause issues if you want to do your own multiprocessing, 
+    # on CPU for larger batch sizes. But can also cause issues if you want to do your own multiprocessing,
     # e.g. with the multiprocessing python module.
     torch.set_num_threads(1)
 

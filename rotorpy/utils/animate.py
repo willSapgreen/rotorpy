@@ -14,7 +14,7 @@ class ClosingFuncAnimation(FuncAnimation):
     def __init__(self, fig, func, *args, **kwargs):
         self._close_on_finish = kwargs.pop('close_on_finish')
         FuncAnimation.__init__(self, fig, func, *args, **kwargs)
-        
+
     def _step(self, *args):
         still_going = FuncAnimation._step(self, *args)
         if self._close_on_finish and not still_going:
