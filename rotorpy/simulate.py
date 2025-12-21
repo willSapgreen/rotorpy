@@ -7,11 +7,12 @@ import torch
 from numpy.linalg import norm
 from scipy.spatial.transform import Rotation
 from time import perf_counter
+from typing import Callable, List, Optional, Dict, Any
 
 import rotorpy.wind
 from rotorpy.controllers.quadrotor_control import BatchedSE3Control
 from rotorpy.vehicles.multirotor import BatchedMultirotor
-
+from rotorpy.coordinators.doot_cbf_coordinator import DootCbfCoordinator
 
 class ExitStatus(Enum):
     """ Exit status values indicate the reason for simulation termination. """
@@ -158,10 +159,48 @@ def simulate_swarm(world, wind_profile,
     # Set the common variables
     num_vehicles = len(vehicles)
     num_coordinators = len(coordinators)
+
     if num_vehicles == 0 or num_coordinators == 0:
         raise ValueError(
             f"simulate_swarm(): number of vehicles or coordinators can't be 0"
         )
+
+
+    # ------------------------------------------------------------
+    # Coordinator membership mapping (vehicle object -> global index)
+    # Each coordinator owns a disjoint subset of vehicles.
+    # ------------------------------------------------------------
+    veh_to_idx = {id(v): i for i, v in enumerate(vehicles)}
+
+    coord_vehicle_indices: List[List[int]] = []
+    used_indices = set()
+
+    for c in coordinators:
+        if not hasattr(c, "vehicles"):
+            raise ValueError(
+                "simulate_swarm(): coordinator must have attribute `vehicles` "
+                "(list of member vehicle objects)."
+            )
+
+        idxs: List[int] = []
+        for v in c.vehicles:
+            key = id(v)
+            if key not in veh_to_idx:
+                raise ValueError(
+                    "simulate_swarm(): coordinator contains a vehicle that is not in the `vehicles` list."
+                )
+            idx = veh_to_idx[key]
+            if idx in used_indices:
+                raise ValueError(
+                    "simulate_swarm(): a vehicle is assigned to multiple coordinators (not allowed)."
+                )
+            used_indices.add(idx)
+            idxs.append(idx)
+
+        if len(idxs) == 0:
+            raise ValueError("simulate_swarm(): coordinator has empty vehicles list (not allowed).")
+
+        coord_vehicle_indices.append(idxs)
 
     # Coerce entries of initial state into numpy arrays, if they are not already.
     for idx in range(num_vehicles):
@@ -234,14 +273,18 @@ def simulate_swarm(world, wind_profile,
         state_estimates.append([estimator.step(state[0], control[0], imu_measurement[0], mocap_measurement[0])])
 
     # Start looping
+    t_global = 0.0
     exit_statuses = [None] * num_vehicles
     while True:
         step_start_time = perf_counter()
 
-        # Update the coordinators
-        for idx in range(num_coordinators):
-            coordinators[idx].step(t_step, [None])
 
+        # Update the coordinators (each receives ONLY its member vehicles' current states)
+        for c, idxs in zip(coordinators, coord_vehicle_indices):
+            member_states = [states[i][-1] for i in idxs]  # latest states for member vehicles
+            c.step(t_global, member_states)
+
+        # Update each vehicle
         for idx in range(num_vehicles):
             vehicle = vehicles[idx]
             trajectory = trajectories[idx]
@@ -287,6 +330,9 @@ def simulate_swarm(world, wind_profile,
         fps = 1/wall_dt
         if print_fps:
             print(f"FPS is {fps}")
+
+        # Update time
+        t_global += t_step
 
         # End-of-step termination check (ALL vehicles finished)
         if all(status is not None for status in exit_statuses):
