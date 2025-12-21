@@ -6,7 +6,7 @@ from rotorpy.utils.numpy_encoding import NumpyJSONEncoder, to_ndarray
 
 def interp_path(path, res):
     if path.size == 3:
-        # There's only one datapoint. Return the point. 
+        # There's only one datapoint. Return the point.
         return path.reshape(1,-1)
     else:
         cumdist = np.cumsum(np.linalg.norm(np.diff(path, axis=0),axis=1))
@@ -176,7 +176,7 @@ class World(object):
 
         if alpha is None:
             alpha = 0.7
-        
+
         if edgecolor is None:
             edgecolor = 'k'
 
