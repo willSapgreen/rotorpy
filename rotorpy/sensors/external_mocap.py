@@ -12,26 +12,26 @@ def hat_map(s):
 
 class MotionCapture():
     """
-    The external motion capture is able to provide pose and twist measurements of the vehicle. 
-    Given the current ground truth state of the vehicle, it will output noisy measurements of the 
-    pose and twist. Artifacts can be introduced 
+    The external motion capture is able to provide pose and twist measurements of the vehicle.
+    Given the current ground truth state of the vehicle, it will output noisy measurements of the
+    pose and twist. Artifacts can be introduced
     """
-    def __init__(self, sampling_rate, 
-                 mocap_params={'pos_noise_density': 0.0005*np.ones((3,)),  # noise density for position 
+    def __init__(self, sampling_rate,
+                 mocap_params={'pos_noise_density': 0.0005*np.ones((3,)),  # noise density for position
                                                     'vel_noise_density': 0.005*np.ones((3,)),          # noise density for velocity
-                                                    'att_noise_density': 0.0005*np.ones((3,)),          # noise density for attitude 
+                                                    'att_noise_density': 0.0005*np.ones((3,)),          # noise density for attitude
                                                     'rate_noise_density': 0.0005*np.ones((3,)),         # noise density for body rates
                                                     'vel_artifact_max': 5,                              # maximum magnitude of the artifact in velocity (m/s)
                                                     'vel_artifact_prob': 0.001,                         # probability that an artifact will occur for a given velocity measurement
                                                     'rate_artifact_max': 1,                             # maximum magnitude of the artifact in body rates (rad/s)
                                                     'rate_artifact_prob': 0.0002                        # probability that an artifact will occur for a given rate measurement
-                                                    }, 
+                                                    },
                 with_artifacts=False):
         """
-        Parameters: 
+        Parameters:
             sampling_rate, Hz, the rate at which this sensor is being sampled. Used for computing the noise.
             mocap_params, a dict with keys
-                pos_noise_density, position noise density, [m/sqrt(Hz)] 
+                pos_noise_density, position noise density, [m/sqrt(Hz)]
                 vel_noise_density, velocity noise density, [m/s / sqrt(Hz)]
                 att_noise_density, attitude noise density, [rad / sqrt(Hz)]
                 rate_noise_density, attitude rate noise density, [rad/s /sqrt(Hz)]
@@ -60,7 +60,7 @@ class MotionCapture():
 
     def measurement(self, state, with_noise=False, with_artifacts=False):
         """
-        Computes and returns the sensor measurement at a time step. 
+        Computes and returns the sensor measurement at a time step.
         Inputs:
             state, a dict describing the state with keys
                     x, position, m, shape=(3,)
@@ -68,10 +68,10 @@ class MotionCapture():
                     q, quaternion [i,j,k,w], shape=(4,)
                     w, angular velocity (in LOCAL frame!), rad/s, shape=(3,)
             with_noise, a boolean to indicate if noise is added
-            with_artifacts, a boolean to indicate if artifacts are added. 
-                    Artifacts are added to the velocity and angular rates, and are due 
-                    to the numerical differentiation scheme used by motion capture systems. 
-                    They will appear as random spikes in the data. 
+            with_artifacts, a boolean to indicate if artifacts are added.
+                    Artifacts are added to the velocity and angular rates, and are due
+                    to the numerical differentiation scheme used by motion capture systems.
+                    They will appear as random spikes in the data.
         Outputs:
             observation, a dictionary with keys
                     x_m, noisy position measurement, m, shape=(3,)
@@ -90,7 +90,7 @@ class MotionCapture():
             v_measured += self.rate_scale * np.random.normal(scale=np.abs(self.vel_density))
             w_measured += self.rate_scale * np.random.normal(scale=np.abs(self.rate_density))
 
-            # Noise has to be treated differently with quaternions... 
+            # Noise has to be treated differently with quaternions...
             # Following https://www.iri.upc.edu/people/jsola/JoanSola/objectes/notes/kinematics.pdf  pg 43
             # First, let's produce a perturbation vector in R3
             delta_phi = self.rate_scale*np.random.normal(scale=np.abs(self.att_density))
@@ -104,7 +104,7 @@ class MotionCapture():
             q_measured = q_measured.as_quat()
 
         if with_artifacts:
-            # If including artifacts, first roll the dice on whether or not a spike should occur for each measurement: 
+            # If including artifacts, first roll the dice on whether or not a spike should occur for each measurement:
             vel_spike_bool = np.random.choice([0,1], p=[1-self.vel_artifact_prob, self.vel_artifact_prob])
             rate_spike_bool = np.random.choice([0,1], p=[1-self.rate_artifact_prob, self.rate_artifact_prob])
 
@@ -143,9 +143,9 @@ if __name__=="__main__":
         return dict_out
 
     sim_rate = 1/500
-    mocap_params = {'pos_noise_density': 0.0005*np.ones((3,)),  # noise density for position 
+    mocap_params = {'pos_noise_density': 0.0005*np.ones((3,)),  # noise density for position
                 'vel_noise_density': 0.005*np.ones((3,)),          # noise density for velocity
-                'att_noise_density': 0.0005*np.ones((3,)),          # noise density for attitude 
+                'att_noise_density': 0.0005*np.ones((3,)),          # noise density for attitude
                 'rate_noise_density': 0.0005*np.ones((3,)),         # noise density for body rates
                 'vel_artifact_max': 5,                              # maximum magnitude of the artifact in velocity (m/s)
                 'vel_artifact_prob': 0.001,                         # probability that an artifact will occur for a given velocity measurement
@@ -158,9 +158,9 @@ if __name__=="__main__":
 
     state = {'x': np.zeros((3,)), 'v': np.zeros((3,)), 'q': np.array([0,0,0,1]), 'w': np.zeros((3,))}
     for i in range(1000):
-        state = {'x': np.array([np.sin(2*np.pi*i/1000), np.sin(2*np.pi*i/1000 - np.pi/2), np.sin(2*np.pi*i/1000 - np.pi/5)]), 
-                 'v': np.array([np.sin(2*np.pi*i/1000), np.sin(2*np.pi*i/1000 - np.pi/2), np.sin(2*np.pi*i/1000 - np.pi/5)]), 
-                 'q': np.array([0,0,0,1]), 
+        state = {'x': np.array([np.sin(2*np.pi*i/1000), np.sin(2*np.pi*i/1000 - np.pi/2), np.sin(2*np.pi*i/1000 - np.pi/5)]),
+                 'v': np.array([np.sin(2*np.pi*i/1000), np.sin(2*np.pi*i/1000 - np.pi/2), np.sin(2*np.pi*i/1000 - np.pi/5)]),
+                 'q': np.array([0,0,0,1]),
                  'w': np.array([np.sin(2*np.pi*i/1000), np.sin(2*np.pi*i/1000 - np.pi/2), np.sin(2*np.pi*i/1000 - np.pi/5)])}
         current = sensor.measurement(state, with_noise=True, with_artifacts=True)
         measurements.append(current)
@@ -173,7 +173,7 @@ if __name__=="__main__":
     w_m = measurements['w']
 
     q_norm = np.linalg.norm(q_m, axis=1)
-    
+
     (fig, axes) = plt.subplots(nrows=4, ncols=1, sharex=True, num="Measurements")
     fig.set_figwidth(9)
     fig.set_figheight(9)

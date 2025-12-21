@@ -57,7 +57,7 @@ class DootCbfCoordinator:
 
         states: list of per-drone dicts, e.g. state['x'], state['v'], ...
         """
-        # Example policy: command +X for all drones (for demonstration only)
+        # Example policy: command +Z for all drones (for demonstration only)
         V = np.zeros((self.N, 3), dtype=float)
-        V[:, 0] = 1.0
+        V[:, 2] = 1.0
         self.set_v_cmd_batch(V)

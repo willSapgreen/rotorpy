@@ -24,6 +24,286 @@ class ExitStatus(Enum):
     FLY_AWAY     = 'Failure: Your quadrotor is out of control; it flew away with a position error greater than 20 meters.'
     COLLISION    = 'Failure: Your quadrotor collided with an object.'
 
+def simulate_swarm(world, wind_profile,
+                   initial_states, vehicles, controllers, trajectories, imus, mocaps, estimators, terminates,
+                   coordinators,
+                   t_final, t_step, safety_margin, use_mocap, print_fps=False):
+    """
+    Perform a multi-vehicle (swarm) simulation and return per-vehicle time histories.
+
+    This function generalizes the single-vehicle `simulate()` routine to a swarm
+    setting. Each vehicle is simulated independently but advanced within a shared
+    time loop, with optional coordination logic executed at every step.
+
+    Inputs
+    ------
+    world : World
+        World object describing the environment, obstacles, and bounds.
+
+    wind_profile : WindProfile
+        Wind generator used to compute wind velocity at each vehicle position.
+
+    initial_states : list[dict]
+        List of initial state dictionaries, one per vehicle.
+
+    vehicles : list[Vehicle]
+        List of vehicle dynamics models.
+
+    controllers : list[Controller]
+        List of controllers, one per vehicle.
+
+    trajectories : list[Trajectory]
+        List of trajectory generators, one per vehicle.
+
+    imus : list[IMU]
+        List of IMU sensor models.
+
+    mocaps : list[MotionCapture]
+        List of motion-capture sensor models.
+
+    estimators : list[Estimator]
+        List of state estimators.
+
+    terminates : list[None | False | callable]
+        Per-vehicle termination specification:
+        - None   : terminate when trajectory end condition is satisfied
+        - False  : never terminate early
+        - func   : custom termination function (t, state) -> ExitStatus or None
+
+    coordinators : list[Coordinator]
+        One or more coordinator objects invoked at every time step.
+        Coordinators may operate on shared swarm information.
+
+    t_final : float
+        Maximum simulation time (seconds).
+
+    t_step : float
+        Simulation time step (seconds).
+
+    safety_margin : float
+        Collision-check radius used by safety termination logic.
+
+    use_mocap : bool
+        If True, controllers receive mocap measurements instead of true state.
+
+    print_fps : bool, optional
+        If True, print achieved simulation FPS.
+
+    Returns
+    -------
+    times : list[np.ndarray]
+        Per-vehicle time histories, each of shape (N_i,).
+
+    states : list[dict]
+        Per-vehicle state histories. Each dict contains stacked arrays with keys:
+        x, v, q, w, rotor_speeds, wind.
+
+    controls : list[dict]
+        Per-vehicle control command histories.
+
+    flats : list[dict]
+        Per-vehicle desired flat-output histories from trajectories.
+
+    imu_measurements : list[dict]
+        Per-vehicle IMU measurement histories (noisy, biased).
+
+    imu_gts : list[dict]
+        Per-vehicle ground-truth IMU histories (noise-free).
+
+    mocap_measurements : list[dict]
+        Per-vehicle motion-capture measurement histories.
+
+    state_estimates : list[dict]
+        Per-vehicle state estimator histories.
+
+    exit_statuses : list[ExitStatus]
+        Termination status for each vehicle.
+    """
+
+
+    #  Check that all input lists for vehicles have the same length
+    names = [
+        "initial_states",
+        "vehicles",
+        "controllers",
+        "trajectories",
+        "imus",
+        "mocaps",
+        "estimators",
+        "terminates",
+    ]
+
+    lists = [
+        initial_states,
+        vehicles,
+        controllers,
+        trajectories,
+        imus,
+        mocaps,
+        estimators,
+        terminates,
+    ]
+
+    sizes = {name: len(lst) for name, lst in zip(names, lists)}
+    expected = sizes["initial_states"]
+
+    mismatch = {k: v for k, v in sizes.items() if v != expected}
+
+    if mismatch:
+        raise ValueError(
+            f"simulate_swarm(): inconsistent list sizes. "
+            f"Expected {expected}. Got {mismatch}"
+        )
+
+    # Set the common variables
+    num_vehicles = len(vehicles)
+    num_coordinators = len(coordinators)
+    if num_vehicles == 0 or num_coordinators == 0:
+        raise ValueError(
+            f"simulate_swarm(): number of vehicles or coordinators can't be 0"
+        )
+
+    # Coerce entries of initial state into numpy arrays, if they are not already.
+    for idx in range(num_vehicles):
+        initial_states[idx] = {k: np.array(v) for k, v in initial_states[idx].items()}
+
+    # Initialize normal_exits for all vehicles
+    normal_exits = [None] * num_vehicles
+    for idx in range(num_vehicles):
+        if terminates[idx] is None:    # Default exit. Terminate at final position of trajectory.
+            normal_exits[idx] = traj_end_exit(initial_states[idx], trajectories[idx], using_vio = False)
+        elif terminates[idx] is False: # Never exit before timeout.
+            normal_exits[idx] = lambda t, s: None
+        else:                    # Custom exit.
+            normal_exits[idx] = terminates[idx]
+
+
+    # Initialize the coordinators
+    for idx in range(num_coordinators):
+        pass
+
+    # Initialize the variables to store results
+    times = [[0.0] for _ in range(num_vehicles)]
+    states = []
+    flats = []
+    mocap_measurements = []
+    controls = []
+    imu_measurements = []
+    imu_gts = []
+    state_estimates = []
+    for idx in range(num_vehicles):
+        initial_state = initial_states[idx]
+        controller = controllers[idx]
+        vehicle = vehicles[idx]
+        trajectory = trajectories[idx]
+        estimator = estimators[idx]
+        time = times[idx]
+        imu = imus[idx]
+
+        # Intialize the states
+        states.append([copy.deepcopy(initial_state)])
+        state = states[idx]
+
+        # TODO: move this line elsewhere so that other objects that don't have wind as a state can work here.
+        state[0]['wind'] = wind_profile.update(0, state[0]['x'])
+
+        # Initialize the flats
+        flats.append([trajectory.update(time[-1])])
+        flat = flats[idx]
+
+        # Initialize mocap_measurements
+        mocap_measurements.append([mocaps[idx].measurement(state[-1], with_noise=True, with_artifacts=False)])
+        mocap_measurement = mocap_measurements[idx]
+
+        # Initialize controls
+        if use_mocap:
+            # In this case the controller will use the motion capture estimate of the pose and twist for control.
+            controls.append([controller.update(time[-1], mocap_measurement[-1], flat[-1])])
+        else:
+            controls.append([controller.update(time[-1], state[-1], flat[-1])])
+        control = controls[idx]
+
+        # Initialize imu_measurements
+        state_dot =  vehicle.statedot(state[0], control[0], t_step)
+
+        imu_measurements.append([imu.measurement(state[-1], state_dot, with_noise=True)])
+        imu_measurement = imu_measurements[idx]
+
+        imu_gts.append([imu.measurement(state[-1], state_dot, with_noise=False)])
+
+        state_estimates.append([estimator.step(state[0], control[0], imu_measurement[0], mocap_measurement[0])])
+
+    # Start looping
+    exit_statuses = [None] * num_vehicles
+    while True:
+        step_start_time = perf_counter()
+
+        # Update the coordinators
+        for idx in range(num_coordinators):
+            coordinators[idx].step(t_step, [None])
+
+        for idx in range(num_vehicles):
+            vehicle = vehicles[idx]
+            trajectory = trajectories[idx]
+            controller = controllers[idx]
+            imu = imus[idx]
+            mocap = mocaps[idx]
+            estimator = estimators[idx]
+
+            exit_status = exit_statuses[idx]
+            normal_exit = normal_exits[idx]
+            state = states[idx]
+            flat = flats[idx]
+            control = controls[idx]
+            time = times[idx]
+            mocap_measurement = mocap_measurements[idx]
+            state_estimate = state_estimates[idx]
+            imu_measurement = imu_measurements[idx]
+            imu_gt = imu_gts[idx]
+
+            # Verify exit status and store the exit status for vehicle idx
+            exit_status = exit_status or safety_exit(world, safety_margin, state[-1], flat[-1], control[-1])
+            exit_status = exit_status or normal_exit(time[-1], state[-1])
+            exit_status = exit_status or time_exit(time[-1], t_final)
+            if exit_status:
+                exit_statuses[idx] = exit_status
+                continue
+
+            time.append(time[-1] + t_step)
+            state[-1]['wind'] = wind_profile.update(time[-1], state[-1]['x'])
+            state.append(vehicle.step(state[-1], control[-1], t_step))
+            flat.append(trajectory.update(time[-1]))
+            mocap_measurement.append(mocap.measurement(state[-1], with_noise=True, with_artifacts=mocap.with_artifacts))
+            state_estimate.append(estimator.step(state[-1], control[-1], imu_measurement[-1], mocap_measurement[-1]))
+            if use_mocap:
+                control.append(controller.update(time[-1], mocap_measurement[-1], flat[-1]))
+            else:
+                control.append(controller.update(time[-1], state[-1], flat[-1]))
+            state_dot = vehicle.statedot(state[-1], control[-1], t_step)
+            imu_measurement.append(imu.measurement(state[-1], state_dot, with_noise=True))
+            imu_gt.append(imu.measurement(state[-1], state_dot, with_noise=False))
+
+        wall_dt = max(perf_counter() - step_start_time, 1e-6)
+        fps = 1/wall_dt
+        if print_fps:
+            print(f"FPS is {fps}")
+
+        # End-of-step termination check (ALL vehicles finished)
+        if all(status is not None for status in exit_statuses):
+            break
+
+    for idx in range(num_vehicles):
+        times[idx]    = np.array(times[idx], dtype=float)
+        states[idx]   = merge_dicts(states[idx])
+        imu_measurements[idx] = merge_dicts(imu_measurements[idx])
+        imu_gts[idx] = merge_dicts(imu_gts[idx])
+        mocap_measurements[idx] = merge_dicts(mocap_measurements[idx])
+        controls[idx]         = merge_dicts(controls[idx])
+        flats[idx]            = merge_dicts(flats[idx])
+        state_estimates[idx]  = merge_dicts(state_estimates[idx])
+
+    return (times, states, controls, flats, imu_measurements, imu_gts, mocap_measurements, state_estimates, exit_statuses)
+
 def simulate(world, initial_state, vehicle, controller, trajectory, wind_profile, imu, mocap, estimator, t_final, t_step, safety_margin, use_mocap, terminate=None, print_fps=False):
     """
     Perform a vehicle simulation and return the numerical results.

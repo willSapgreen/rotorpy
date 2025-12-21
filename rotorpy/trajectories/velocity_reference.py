@@ -34,7 +34,6 @@ class VelocityReference(object):
 
         dt = t - self._last_t
         self._last_t = t
-
         v = np.array(self.v_cmd_fn(t), dtype=float).reshape(3,)
 
         # Integrate x_ref so x and x_dot are kinematically consistent
@@ -73,7 +72,6 @@ class VelocityReference(object):
             raise ValueError(f"Unknown yaw_mode: {self.yaw_mode}")
 
         self._last_v = v.copy()
-
         flat_output = {
             'x': self.x_ref,
             'x_dot': v,
