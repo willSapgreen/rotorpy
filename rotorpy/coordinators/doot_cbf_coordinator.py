@@ -54,8 +54,8 @@ class DootCbfCoordinator:
     ):
         # Membership / core
         self.vehicles = vehicles
-        self.N = len(self.vehicles)
-        if self.N < 1:
+        self.num_vehicles = len(self.vehicles)
+        if self.num_vehicles < 1:
             raise ValueError("vehicles must be a non-empty list.")
         self.velocity_max = velocity_max  # scalar cap (m/s) for all vehicles in this coordinator
 
@@ -95,7 +95,7 @@ class DootCbfCoordinator:
             raise ValueError("var_trial_move must be nonnegative per axis.")
 
         # DOOT runtime state
-        self.phi = np.zeros((self.N,), dtype=float)  # dual potential at agent locations
+        self.phi = np.zeros((self.num_vehicles,), dtype=float)  # dual potential at agent locations
         self.last_time: Optional[float] = None
 
         # RNG
@@ -104,8 +104,8 @@ class DootCbfCoordinator:
             self.rng = np.random.default_rng(self._FIXED_SEED)
 
         # Command storage
-        self._v_cmd = np.zeros((self.N, 3), dtype=float)
-        self._v_cmd_fns = [self._make_v_cmd_fn(i) for i in range(self.N)]
+        self._v_cmd = np.zeros((self.num_vehicles, 3), dtype=float)
+        self._v_cmd_fns = [self._make_v_cmd_fn(i) for i in range(self.num_vehicles)]
 
     def _make_v_cmd_fn(self, i: int) -> Callable[[float], np.ndarray]:
         def v_cmd_fn(t: float) -> np.ndarray:
@@ -117,8 +117,8 @@ class DootCbfCoordinator:
 
     def set_v_cmd_batch(self, V: np.ndarray) -> None:
         V = np.asarray(V, dtype=float)
-        if V.shape != (self.N, 3):
-            raise ValueError(f"V must have shape {(self.N, 3)}, got {V.shape}")
+        if V.shape != (self.num_vehicles, 3):
+            raise ValueError(f"V must have shape {(self.num_vehicles, 3)}, got {V.shape}")
 
         if self.velocity_max is not None:
             speeds = np.linalg.norm(V, axis=1)
@@ -134,7 +134,7 @@ class DootCbfCoordinator:
 
         Inputs:
           t: global simulation time (seconds)
-          states: list of length self.N, only for member vehicles; each must include 'x' (3,)
+          states: list of length self.num_vehicles, only for member vehicles; each must include 'x' (3,)
 
         Behavior:
           - compute dt = t - last_time
@@ -144,24 +144,24 @@ class DootCbfCoordinator:
           - convert displacement to velocity v = d/dt
           - store v in _v_cmd
         """
-        if len(states) != self.N:
-            raise ValueError(f"states must have length N={self.N}, got {len(states)}")
+        if len(states) != self.num_vehicles:
+            raise ValueError(f"states must have length num_vehicles={self.num_vehicles}, got {len(states)}")
 
         # Initialize time on first call
         if self.last_time is None:
             self.last_time = float(t)
-            self.set_v_cmd_batch(np.zeros((self.N, 3), dtype=float))
+            self.set_v_cmd_batch(np.zeros((self.num_vehicles, 3), dtype=float))
             return
 
         dt = float(t) - float(self.last_time)
         self.last_time = float(t)
 
         if (not np.isfinite(dt)) or dt <= 0.0:
-            self.set_v_cmd_batch(np.zeros((self.N, 3), dtype=float))
+            self.set_v_cmd_batch(np.zeros((self.num_vehicles, 3), dtype=float))
             return
 
-        # Extract positions X (N,3)
-        X = np.zeros((self.N, 3), dtype=float)
+        # Extract positions X (num_vehicles,3)
+        X = np.zeros((self.num_vehicles, 3), dtype=float)
         for i, s in enumerate(states):
             if "x" not in s:
                 raise KeyError("Each state must contain key 'x' with shape (3,).")
@@ -178,41 +178,41 @@ class DootCbfCoordinator:
         if planar:
             axes_2d = tuple(np.argsort(std_xyz)[-2:].tolist())  # e.g. (0,2) for XZ plane
             dropped_axis = int(np.argsort(std_xyz)[0])
-            Xp = X[:, axes_2d]                           # (N,2)
+            Xp = X[:, axes_2d]                           # (num_vehicles,2)
             Tp = self.targeted_positions[:, axes_2d]     # (M,2)
         else:
             axes_2d = None
             dropped_axis = None
-            Xp = X                                       # (N,3)
+            Xp = X                                       # (num_vehicles,3)
             Tp = self.targeted_positions                 # (M,3)
 
         # ------------------------------------------------------------
         # 1) count: assign each target sample to nearest agent
         # ------------------------------------------------------------
         M = int(self.targeted_positions.shape[0])
-        diff_ta = Tp[:, None, :] - Xp[None, :, :]        # (M,N,dim)
-        d2_ta = np.sum(diff_ta * diff_ta, axis=2)        # (M,N)
+        diff_ta = Tp[:, None, :] - Xp[None, :, :]        # (M,num_vehicles,dim)
+        d2_ta = np.sum(diff_ta * diff_ta, axis=2)        # (M,num_vehicles)
         nearest_agent = np.argmin(d2_ta, axis=1)         # (M,)
-        count = np.bincount(nearest_agent, minlength=self.N).astype(float) / float(M)
+        count = np.bincount(nearest_agent, minlength=self.num_vehicles).astype(float) / float(M)
 
         # ------------------------------------------------------------
         # 2) Neighbor graph + Laplacian from agent kNN (excluding self)
         # ------------------------------------------------------------
         k = int(self.doot_config.num_neighbors)
-        if k >= self.N:
-            # Excluding self, max meaningful neighbors is N-1
-            k = self.N - 1
+        if k >= self.num_vehicles:
+            # Excluding self, max meaningful neighbors is num_vehicles-1
+            k = self.num_vehicles - 1
 
-        diff_aa = Xp[:, None, :] - Xp[None, :, :]        # (N,N,dim)
-        d2_aa = np.sum(diff_aa * diff_aa, axis=2)        # (N,N)
+        diff_aa = Xp[:, None, :] - Xp[None, :, :]        # (num_vehicles,num_vehicles,dim)
+        d2_aa = np.sum(diff_aa * diff_aa, axis=2)        # (num_vehicles,num_vehicles)
         np.fill_diagonal(d2_aa, np.inf)
 
-        # kth index safety when N is small
-        kth = min(k - 1, self.N - 2) if self.N >= 2 else 0
-        nn_idx = np.argpartition(d2_aa, kth=kth, axis=1)[:, :k]  # (N,k)
+        # kth index safety when num_vehicles is small
+        kth = min(k - 1, self.num_vehicles - 2) if self.num_vehicles >= 2 else 0
+        nn_idx = np.argpartition(d2_aa, kth=kth, axis=1)[:, :k]  # (num_vehicles,k)
 
-        A = np.zeros((self.N, self.N), dtype=float)
-        rows = np.repeat(np.arange(self.N), k)
+        A = np.zeros((self.num_vehicles, self.num_vehicles), dtype=float)
+        rows = np.repeat(np.arange(self.num_vehicles), k)
         cols = nn_idx.reshape(-1)
         A[rows, cols] = 1.0
 
@@ -223,12 +223,12 @@ class DootCbfCoordinator:
         # ------------------------------------------------------------
         # 3) Primal–dual inner iterations updating phi
         # ------------------------------------------------------------
-        one_over_N = 1.0 / float(self.N)
+        one_over_N = 1.0 / float(self.num_vehicles)
         gain = 1.0 / float(k + 1)
 
         phi = self.phi
         for _ in range(int(self.doot_config.max_iter_primaldual)):
-            phi = phi - gain * (L @ phi) + one_over_N * np.ones((self.N,), dtype=float) - count
+            phi = phi - gain * (L @ phi) + one_over_N * np.ones((self.num_vehicles,), dtype=float) - count
         self.phi = phi
 
         # ------------------------------------------------------------
@@ -248,7 +248,7 @@ class DootCbfCoordinator:
         # ------------------------------------------------------------
         # 5) Transport step via trial moves
         # ------------------------------------------------------------
-        V_nom = np.zeros((self.N, 3), dtype=float)
+        V_nom = np.zeros((self.num_vehicles, 3), dtype=float)
 
         if not self.doot_config.use_random_sampling:
             self.set_v_cmd_batch(V_nom)
@@ -273,10 +273,10 @@ class DootCbfCoordinator:
         norms_kept = norms[keep]
 
         if disp_kept.shape[0] == 0:
-            self.set_v_cmd_batch(np.zeros((self.N, 3), dtype=float))
+            self.set_v_cmd_batch(np.zeros((self.num_vehicles, 3), dtype=float))
             return
 
-        for m in range(self.N):
+        for m in range(self.num_vehicles):
             pos_trial = X[m, :][None, :] + disp_kept  # (K,3)
 
             if planar:
