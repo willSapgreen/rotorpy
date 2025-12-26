@@ -290,3 +290,134 @@ class DootCbfCoordinator:
             V_nom[m, :] = v_disp / dt
 
         self.set_v_cmd_batch(V_nom)
+
+
+def unit_test_01():
+    import copy
+    import os
+
+    import numpy as np
+    import matplotlib.pyplot as plt
+    import cv2
+
+    # Initialize the "world"
+    num_vehicles = 20
+    vehicles = [None] * num_vehicles
+
+    targeted_positions = [[0.0, 0.0, 0.0]]
+
+    sim_time = 200
+    dt = 1
+    intervals = int(sim_time / dt)
+
+    # Initialize the vehicles' initial states
+    bounds = np.array([[-5, 5], [-5, 5], [-0.5, 3]], dtype=float)
+    mean_init = np.array([4.0, 4.0, 0.0], dtype=float)
+    std_init  = np.sqrt(np.array([1.0, 3.0, 0.0], dtype=float))
+
+    rng = np.random.default_rng(0)
+    x0_positions = np.empty((0, 3), dtype=float)
+
+    while x0_positions.shape[0] < num_vehicles:
+        batch = rng.normal(loc=mean_init, scale=std_init, size=(num_vehicles, 3))
+        batch[:, 2] = mean_init[2]
+        ok = np.all((batch >= bounds[:, 0]) & (batch <= bounds[:, 1]), axis=1)
+        x0_positions = np.vstack([x0_positions, batch[ok]])
+
+    x0_positions = x0_positions[:num_vehicles]
+
+    x0s = []
+    for i in range(num_vehicles):
+        x0s.append(
+            {
+                "x": x0_positions[i].astype(float),
+                "v": np.zeros(3),
+                "q": np.array([0.0, 0.0, 0.0, 1.0]),
+                "w": np.zeros(3),
+                "wind": np.zeros(3),
+                "rotor_speeds": np.full(4, 1788.53),
+            }
+        )
+
+    doot_config = DootConfig(
+        num_neighbors=min(5, num_vehicles - 1),
+        max_iter_primaldual=10,
+        use_random_sampling=True,
+        num_trial_move_samples=300,
+        min_displacement_norm=0.1,
+        planar_std_threshold=0.1,
+    )
+
+    coordinator = DootCbfCoordinator(
+        vehicles=vehicles,
+        velocity_max=1.0,
+        targeted_positions=targeted_positions,
+        doot_config=doot_config,
+    )
+
+    # Output path: same directory as doot_cbf_coordinator.py
+    out_dir = os.path.dirname(os.path.abspath(__file__))
+    avi_path = os.path.join(out_dir, "doot_cbf_coordinator_ut01.avi")
+
+    cur_time = 0.0
+    cur_x = copy.deepcopy(x0s)
+
+    # --- Matplotlib 2D plot setup ---
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ax.set_xlim(bounds[0, 0], bounds[0, 1])
+    ax.set_ylim(bounds[1, 0], bounds[1, 1])
+    ax.set_aspect("equal")
+    ax.grid(True)
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+
+    target_xy = np.array(targeted_positions, dtype=float)[:, :2]
+    ax.plot(target_xy[:, 0], target_xy[:, 1], "rx", markersize=10)
+
+    # Initial XY (use initial states so scatter has N points)
+    XY0 = np.array([cur_x[i]["x"][:2] for i in range(num_vehicles)], dtype=float)
+
+    # Random per-vehicle colors (different each run is OK)
+    colors = np.random.rand(num_vehicles, 3)  # RGB in [0,1]
+
+    scat = ax.scatter(XY0[:, 0], XY0[:, 1], s=20, c=colors)
+
+    fig.canvas.draw()
+
+    # --- OpenCV VideoWriter (MATLAB-style) ---
+    width, height = fig.canvas.get_width_height()
+    fourcc = cv2.VideoWriter_fourcc(*"XVID")
+    video = cv2.VideoWriter(avi_path, fourcc, 10, (width, height))
+
+    for step in range(intervals):
+        coordinator.step(cur_time, cur_x)
+        v_cmd_fns = coordinator.get_v_cmd_fns()
+
+        for i in range(num_vehicles):
+            v = np.asarray(v_cmd_fns[i](cur_time), dtype=float).reshape(3,)
+            cur_x[i]["x"] += v * dt
+
+        XY = np.array([cur_x[i]["x"][:2] for i in range(num_vehicles)], dtype=float)
+        scat.set_offsets(XY)
+        ax.set_title(f"t = {cur_time:.2f} s")
+
+        fig.canvas.draw()
+
+        # Backend-safe capture for TkAgg: ARGB buffer
+        buf = np.frombuffer(fig.canvas.tostring_argb(), dtype=np.uint8)
+        buf = buf.reshape(height, width, 4)
+
+        # ARGB -> BGR for OpenCV (drop alpha)
+        frame = buf[:, :, [3, 2, 1]]
+        video.write(frame)
+
+        cur_time += dt
+
+    video.release()
+    plt.close(fig)
+
+
+if __name__ == "__main__":
+    print(f"==== Start DootCbfCoordinator unit test 01 ====")
+    unit_test_01()
+    print(f"==== Finish DootCbfCoordinator unit test 01 ====")

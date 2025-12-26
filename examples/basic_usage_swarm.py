@@ -41,18 +41,18 @@ world = World.from_file(
 
 # ===================== Swarm setup =====================
 
-N = 10  # number of vehicles
+num_vehicles = 20  # (CHANGED) 20 vehicles
 
-vehicles = [Multirotor(quad_params) for _ in range(N)]
-controllers = [SE3Control(quad_params) for _ in range(N)]
+vehicles = [Multirotor(quad_params) for _ in range(num_vehicles)]
+controllers = [SE3Control(quad_params) for _ in range(num_vehicles)]
 
+# (CHANGED) only one target position at origin
 targeted_positions = [
-    [-2.0,  0.0, 1.5],
-    [ 2.0,  0.0, 1.5],
+    [0.0, 0.0, 0.0],
 ]
 
 doot_config = DootConfig(
-    num_neighbors=5,
+    num_neighbors=min(5, num_vehicles - 1),   # keep "10 neighbors" intent, but cap at num_vehicles-1
     max_iter_primaldual=10,
     use_random_sampling=True,
     num_trial_move_samples=300,
@@ -69,34 +69,42 @@ coordinator = DootCbfCoordinator(
 
 # ===================== Initial states (MUST come before trajectories) =====================
 
+bounds = np.array([[-5, 5], [-5, 5], [-0.5, 3]], dtype=float)
+mean_init = np.array([4.0, 4.0, 0.0], dtype=float)
+std_init  = np.sqrt(np.array([1.0, 3.0, 0.0], dtype=float))
+
+rng = np.random.default_rng(0)
+x0_positions = np.empty((0, 3), dtype=float)
+
+while x0_positions.shape[0] < num_vehicles:
+    batch = rng.normal(loc=mean_init, scale=std_init, size=(num_vehicles, 3))
+    batch[:, 2] = mean_init[2]  # enforce z variance = 0 exactly
+    ok = np.all((batch >= bounds[:, 0]) & (batch <= bounds[:, 1]), axis=1)
+    x0_positions = np.vstack([x0_positions, batch[ok]])
+
+x0_positions = x0_positions[:num_vehicles]
+
+# Build RotorPy initial-state dicts
 x0s = []
-
-xs = np.linspace(-1.5, 1.5, 5)
-ys = np.linspace(-1.0, 1.0, 2)
-
-idx = 0
-for y in ys:
-    for x in xs:
-        if idx >= N:
-            break
-        x0s.append(
-            {
-                "x": np.array([x, y, 1.0], dtype=float),
-                "v": np.zeros(3, dtype=float),
-                "q": np.array([0.0, 0.0, 0.0, 1.0], dtype=float),
-                "w": np.zeros(3, dtype=float),
-                "wind": np.zeros(3, dtype=float),
-                "rotor_speeds": np.array([1788.53, 1788.53, 1788.53, 1788.53], dtype=float),
-            }
-        )
-        idx += 1
+for i in range(num_vehicles):
+    p = x0_positions[i, :].astype(float)
+    x0s.append(
+        {
+            "x": p,
+            "v": np.zeros(3, dtype=float),
+            "q": np.array([0.0, 0.0, 0.0, 1.0], dtype=float),
+            "w": np.zeros(3, dtype=float),
+            "wind": np.zeros(3, dtype=float),
+            "rotor_speeds": np.array([1788.53, 1788.53, 1788.53, 1788.53], dtype=float),
+        }
+    )
 
 # ===================== Trajectories (now x0s exists) =====================
 
 v_cmd_fns = coordinator.get_v_cmd_fns()
 trajectories = [
     VelocityReference(v_cmd_fns[i], x0s[i]["x"])
-    for i in range(N)
+    for i in range(num_vehicles)
 ]
 
 # ===================== Environment =====================
@@ -118,10 +126,11 @@ sim_instance = EnvironmentSwarm(
 # Set initial state AFTER environment is created
 sim_instance.set_init(x0s)
 
+
 # ===================== Run simulation =====================
 
 results = sim_instance.run(
-    t_final=3.5,
+    t_final=10.0,
     use_mocap=False,
     terminates=False,
     animate_bool=True,
