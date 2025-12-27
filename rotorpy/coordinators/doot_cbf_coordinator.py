@@ -417,7 +417,170 @@ def unit_test_01():
     plt.close(fig)
 
 
+def unit_test_02():
+    import copy
+    import os
+
+    import numpy as np
+    import matplotlib.pyplot as plt
+    import cv2
+
+    from scipy.stats import multivariate_normal
+
+    # Initialize the "world"
+    num_vehicles = 200
+    vehicles = [None] * num_vehicles
+
+    # --- MATLAB-matching parameters ---
+    n_samples = 500
+    components = 20
+    dom_size = 5  # for the same grid construction as MATLAB
+
+    sim_time = 200
+    dt = 1
+    intervals = int(sim_time / dt)
+
+    # RNG (different each run is OK)
+    rng = np.random.default_rng()
+
+    # ============================================================
+    # Target distribution µ* (MATLAB: gm = gmdistribution(mean_des, var_des); samples = random(gm,n_samples))
+    # ============================================================
+    mean_des = 8.0 * (rng.random((components, 2)) - 0.5)  # in [-4,4] for each component center
+    var_des = np.array([0.25, 0.25], dtype=float)
+    cov_des = np.diag(var_des)
+
+    # MATLAB gmdistribution default: equal component weights
+    comp_ids = rng.integers(low=0, high=components, size=n_samples)
+    samples_xy = np.empty((n_samples, 2), dtype=float)
+    for k in range(components):
+        idx = np.where(comp_ids == k)[0]
+        if idx.size == 0:
+            continue
+        samples_xy[idx, :] = rng.multivariate_normal(mean=mean_des[k], cov=cov_des, size=idx.size)
+
+    # targeted_positions expected as 3D points in your coordinator interface
+    targeted_positions = np.hstack([samples_xy, np.zeros((n_samples, 1), dtype=float)]).tolist()
+
+    # Optional: density map Z for visualization parity with MATLAB (not used in control)
+    x = np.arange(-dom_size, dom_size + dom_size / 100.0, dom_size / 100.0)
+    y = np.arange(-dom_size, dom_size + dom_size / 100.0, dom_size / 100.0)
+    X, Y = np.meshgrid(x, y)
+    grid_xy = np.column_stack([X.ravel(), Y.ravel()])
+
+    # Mixture PDF: average of component PDFs (equal weights)
+    Z = np.zeros(grid_xy.shape[0], dtype=float)
+    for k in range(components):
+        Z += multivariate_normal(mean=mean_des[k], cov=cov_des).pdf(grid_xy)
+    Z /= components
+    Z = Z.reshape(X.shape)
+
+    # ============================================================
+    # Initial agent distribution (MATLAB: gm_init = gmdistribution(mean_init, var_init); pos_init = random(gm_init,N))
+    # ============================================================
+    mean_init = np.array([5.0, 5.0], dtype=float)
+    var_init = np.array([2.0, 6.0], dtype=float)
+    cov_init = np.diag(var_init)
+
+    pos_init_xy = rng.multivariate_normal(mean=mean_init, cov=cov_init, size=num_vehicles)
+
+    x0s = []
+    for i in range(num_vehicles):
+        x0s.append(
+            {
+                "x": np.array([pos_init_xy[i, 0], pos_init_xy[i, 1], 0.0], dtype=float),
+                "v": np.zeros(3),
+                "q": np.array([0.0, 0.0, 0.0, 1.0]),
+                "w": np.zeros(3),
+                "wind": np.zeros(3),
+                "rotor_speeds": np.full(4, 1788.53),
+            }
+        )
+
+    doot_config = DootConfig(
+        num_neighbors=min(10, num_vehicles - 1),  # MATLAB n_neigh = 10
+        max_iter_primaldual=10,
+        use_random_sampling=True,
+        num_trial_move_samples=300,               # MATLAB n_trial_samples = 300
+        min_displacement_norm=0.1,                # MATLAB d>=0.1
+        planar_std_threshold=0.1,
+    )
+
+    coordinator = DootCbfCoordinator(
+        vehicles=vehicles,
+        velocity_max=1.0,
+        targeted_positions=targeted_positions,
+        doot_config=doot_config,
+    )
+
+    # Output path: same directory as this file
+    out_dir = os.path.dirname(os.path.abspath(__file__))
+    avi_path = os.path.join(out_dir, "doot_cbf_coordinator_ut02.avi")
+
+    cur_time = 0.0
+    cur_x = copy.deepcopy(x0s)
+
+    # --- Matplotlib 2D plot setup ---
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ax.set_aspect("equal")
+    ax.grid(True)
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+
+    # Show target samples (discrete points) like MATLAB "samples"
+    ax.scatter(samples_xy[:, 0], samples_xy[:, 1], s=8, c="k", alpha=0.15, linewidths=0)
+
+    # Initial agent scatter
+    XY0 = np.array([cur_x[i]["x"][:2] for i in range(num_vehicles)], dtype=float)
+
+    # Random per-vehicle colors (different each run is OK)
+    colors = rng.random((num_vehicles, 3))
+
+    scat = ax.scatter(XY0[:, 0], XY0[:, 1], s=20, c=colors)
+
+    fig.canvas.draw()
+
+    # --- OpenCV VideoWriter ---
+    width, height = fig.canvas.get_width_height()
+    fourcc = cv2.VideoWriter_fourcc(*"XVID")
+    video = cv2.VideoWriter(avi_path, fourcc, 10, (width, height))
+
+    for step in range(intervals):
+        coordinator.step(cur_time, cur_x)
+        v_cmd_fns = coordinator.get_v_cmd_fns()
+
+        for i in range(num_vehicles):
+            v = np.asarray(v_cmd_fns[i](cur_time), dtype=float).reshape(3,)
+            v[2] = 0.0  # enforce 2D
+            cur_x[i]["x"] += v * dt
+            cur_x[i]["x"][2] = 0.0
+
+        XY = np.array([cur_x[i]["x"][:2] for i in range(num_vehicles)], dtype=float)
+        scat.set_offsets(XY)
+
+        ax.set_title(f"t = {cur_time:.2f} s")
+
+        fig.canvas.draw()
+
+        # Backend-safe capture for TkAgg: ARGB buffer
+        buf = np.frombuffer(fig.canvas.tostring_argb(), dtype=np.uint8)
+        buf = buf.reshape(height, width, 4)
+
+        # ARGB -> BGR for OpenCV (drop alpha)
+        frame = buf[:, :, [3, 2, 1]]
+        video.write(frame)
+
+        cur_time += dt
+
+    video.release()
+    plt.close(fig)
+
+
 if __name__ == "__main__":
     print(f"==== Start DootCbfCoordinator unit test 01 ====")
     unit_test_01()
     print(f"==== Finish DootCbfCoordinator unit test 01 ====")
+
+    print(f"==== Start DootCbfCoordinator unit test 02 ====")
+    unit_test_02()
+    print(f"==== Finish DootCbfCoordinator unit test 02 ====")
