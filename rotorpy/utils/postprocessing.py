@@ -9,11 +9,11 @@ def unpack_sim_data(result):
     Unpacks the simulated result dictionary and converts it to a Pandas DataFrame
 
     """
-    
+
     headers = [ 'time',                                                                                                                                                         # Time
             'x', 'y', 'z', 'xdot', 'ydot', 'zdot', 'qx', 'qy', 'qz', 'qw', 'wx', 'wy', 'wz', 'windx', 'windy', 'windz', 'r1', 'r2', 'r3', 'r4',                             # Vehicle state                                                                                                                                               # GT body velocity
             'xdes', 'ydes', 'zdes', 'xdotdes', 'ydotdes', 'zdotdes', 'xddotdes', 'yddotdes', 'zddotdes', 'xdddotdes', 'ydddotdes', 'zdddotdes',                             # Flat outputs
-            'xddddotdes', 'yddddotdes', 'zddddotdes', 'yawdes', 'yawdotdes', 
+            'xddddotdes', 'yddddotdes', 'zddddotdes', 'yawdes', 'yawdotdes',
             'ax', 'ay', 'az', 'ax_gt', 'ay_gt', 'az_gt', 'gx', 'gy', 'gz',                                                                                                  # IMU measurements
             'mocap_x', 'mocap_y', 'mocap_z', 'mocap_xdot', 'mocap_ydot', 'mocap_zdot', 'mocap_qx', 'mocap_qy', 'mocap_qz', 'mocap_qw', 'mocap_wx', 'mocap_wy', 'mocap_wz',  # Mocap measurements
             'r1des', 'r2des', 'r3des', 'r4des', 'thrustdes', 'qxdes', 'qydes', 'qzdes', 'qwdes', 'mxdes', 'mydes', 'mzdes',                                                 # Controller
@@ -68,23 +68,23 @@ def unpack_sim_data(result):
 
         dataset = np.hstack((time,
                              x, v, q, w, wind, rotor_speeds,
-                             x_des, v_des, a_des, j_des, s_des, yaw_des, yawdot_des, 
-                             a_measured, a_actual, w_measured, 
+                             x_des, v_des, a_des, j_des, s_des, yaw_des, yawdot_des,
+                             a_measured, a_actual, w_measured,
                              x_mc, v_mc, q_mc, w_mc,
-                             cmd_rotor, cmd_thrust, cmd_q, cmd_moment, 
+                             cmd_rotor, cmd_thrust, cmd_q, cmd_moment,
                              filter_state, sd))
     else:
         sd = []
 
         dataset = np.hstack((time,
                             x, v, q, w, wind, rotor_speeds,
-                            x_des, v_des, a_des, j_des, s_des, yaw_des, yawdot_des, 
-                            a_measured, a_actual, w_measured, 
+                            x_des, v_des, a_des, j_des, s_des, yaw_des, yawdot_des,
+                            a_measured, a_actual, w_measured,
                             x_mc, v_mc, q_mc, w_mc,
                             cmd_rotor, cmd_thrust, cmd_q, cmd_moment))
     df = pd.DataFrame(data=dataset,
                         columns=headers)
-    
+
     return df
 
 def save_sim_data(result, filename="output.csv"):
@@ -96,11 +96,11 @@ def save_sim_data(result, filename="output.csv"):
         # Check whether or not filename contains .csv
         filename = filename + ".csv"
 
-    # Get dataframe from simulation data. 
+    # Get dataframe from simulation data.
     df = unpack_sim_data(result)
 
-    # Send it to csv file and save it in /rotorpy/data_out/ file. 
+    # Send it to csv file and save it in /rotorpy/data_out/ file.
     path = os.path.join(os.path.dirname(__file__), '..', 'data_out/'+filename)
     df.to_csv(path)
 
-    return 
+    return

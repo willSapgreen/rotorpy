@@ -149,7 +149,7 @@ class EnvironmentSwarm():
             t_final=10,
             use_mocap=False,
             terminates=False,
-            animate_bool=True,
+            animate_bool=False,
             animate_wind=False,
             verbose=False,
             fname=None):

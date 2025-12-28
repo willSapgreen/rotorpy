@@ -432,7 +432,7 @@ def unit_test_02():
     vehicles = [None] * num_vehicles
 
     # --- MATLAB-matching parameters ---
-    n_samples = 500
+    num_targets = 500
     components = 20
     dom_size = 5  # for the same grid construction as MATLAB
 
@@ -444,15 +444,15 @@ def unit_test_02():
     rng = np.random.default_rng()
 
     # ============================================================
-    # Target distribution µ* (MATLAB: gm = gmdistribution(mean_des, var_des); samples = random(gm,n_samples))
+    # Target distribution µ* (MATLAB: gm = gmdistribution(mean_des, var_des); samples = random(gm,num_targets))
     # ============================================================
     mean_des = 8.0 * (rng.random((components, 2)) - 0.5)  # in [-4,4] for each component center
     var_des = np.array([0.25, 0.25], dtype=float)
     cov_des = np.diag(var_des)
 
     # MATLAB gmdistribution default: equal component weights
-    comp_ids = rng.integers(low=0, high=components, size=n_samples)
-    samples_xy = np.empty((n_samples, 2), dtype=float)
+    comp_ids = rng.integers(low=0, high=components, size=num_targets)
+    samples_xy = np.empty((num_targets, 2), dtype=float)
     for k in range(components):
         idx = np.where(comp_ids == k)[0]
         if idx.size == 0:
@@ -460,7 +460,7 @@ def unit_test_02():
         samples_xy[idx, :] = rng.multivariate_normal(mean=mean_des[k], cov=cov_des, size=idx.size)
 
     # targeted_positions expected as 3D points in your coordinator interface
-    targeted_positions = np.hstack([samples_xy, np.zeros((n_samples, 1), dtype=float)]).tolist()
+    targeted_positions = np.hstack([samples_xy, np.zeros((num_targets, 1), dtype=float)]).tolist()
 
     # Optional: density map Z for visualization parity with MATLAB (not used in control)
     x = np.arange(-dom_size, dom_size + dom_size / 100.0, dom_size / 100.0)
