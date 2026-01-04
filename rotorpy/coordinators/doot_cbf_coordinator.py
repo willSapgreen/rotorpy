@@ -13,7 +13,7 @@ class DootConfig:
     num_neighbors: int                 # kNN neighbors excluding self
     max_iter_primaldual: int           # inner primal-dual iterations per outer step
 
-    use_random_sampling: bool = True
+    use_random_sampling: bool = False  # Using _FIXED_SEED to have deterministic sampling result
     num_trial_move_samples: int = 300
     mean_trial_move: Optional[List[float]] = None   # len-3
     var_trial_move: Optional[List[float]] = None    # len-3 (per-axis variance)
@@ -158,9 +158,11 @@ class DootCbfCoordinator:
         self.last_time: Optional[float] = None
 
         # RNG
-        self.rng: Optional[np.random.Generator] = None
-        if self.doot_config.use_random_sampling:
-            self.rng = np.random.default_rng(self._FIXED_SEED)
+        # - use_random_sampling=True  -> non-deterministic seed (system entropy)
+        # - use_random_sampling=False -> deterministic seed (_FIXED_SEED)
+        seed = None if self.doot_config.use_random_sampling else self._FIXED_SEED
+        self.rng: np.random.Generator = np.random.default_rng(seed)
+
 
         # Command storage
         self._transport_vel = np.zeros((self.num_vehicles, 3), dtype=float)
@@ -415,7 +417,7 @@ class DootCbfCoordinator:
         num_targeted_pos = int(self.targeted_positions.shape[0])
         diff_ta = targeted_positions[:, None, :] - positions_2d[None, :, :]        # (num_targeted_pos,num_vehicles,dim)
         d2_ta = np.sum(diff_ta * diff_ta, axis=2)        # (num_targeted_pos,num_vehicles)
-        nearest_agent = np.argmin(d2_ta, axis=1)         # (num_targeted_pos,)
+        nearest_agent = np.argmin(d2_ta, axis=1)         # (num_targeted_pos,) nearest_agent[i] = j means i-th sample is assigned to j-th agent
         count = np.bincount(nearest_agent, minlength=self.num_vehicles).astype(float) / float(num_targeted_pos)
 
         # ------------------------------------------------------------
@@ -426,6 +428,7 @@ class DootCbfCoordinator:
             # Excluding self, max meaningful neighbors is num_vehicles-1
             k = self.num_vehicles - 1
 
+        # TODO: If the agents’ distribution is non-planar, the difference in the z-coordinate must be taken into account.
         diff_aa = positions_2d[:, None, :] - positions_2d[None, :, :]        # (num_vehicles,num_vehicles,dim)
         d2_aa = np.sum(diff_aa * diff_aa, axis=2)        # (num_vehicles,num_vehicles)
         np.fill_diagonal(d2_aa, np.inf)
@@ -463,26 +466,20 @@ class DootCbfCoordinator:
         phi_lin = LinearNDInterpolator(positions_2d, self.phi, fill_value=np.nan)
         phi_nn = NearestNDInterpolator(positions_2d, self.phi)
 
-        def evaluate_phi_with_fallback(P: np.ndarray) -> np.ndarray:
-            v = phi_lin(P)
+        def evaluate_phi_with_fallback(pos: np.ndarray) -> np.ndarray:
+            v = phi_lin(pos)
             v = np.asarray(v, dtype=float)
             mask = ~np.isfinite(v)
+
+            # Use nearest-neighbor if linear interpolation is undefined
             if np.any(mask):
-                v[mask] = phi_nn(P[mask])
+                v[mask] = phi_nn(pos[mask])
             return v
 
         # ------------------------------------------------------------
         # 5) Transport step via trial moves (nominal)
         # ------------------------------------------------------------
         v_nom = np.zeros((self.num_vehicles, 3), dtype=float)
-
-        if not self.doot_config.use_random_sampling:
-            self.set_transport_vel_batch(v_nom)
-            self._positions_prev_cbf = positions.copy()
-            return
-
-        if self.rng is None:
-            raise RuntimeError("use_random_sampling=True but RNG is not initialized.")
 
         disp = self.rng.normal(
             loc=self.mean_trial_move,
@@ -590,7 +587,7 @@ def unit_test_01():
     doot_config = DootConfig(
         num_neighbors=min(5, num_vehicles - 1),
         max_iter_primaldual=10,
-        use_random_sampling=True,
+        use_random_sampling=False,
         num_trial_move_samples=300,
         min_displacement_norm=0.1,
         planar_std_threshold=0.1,
@@ -748,7 +745,7 @@ def unit_test_02():
     doot_config = DootConfig(
         num_neighbors=min(10, num_vehicles - 1),
         max_iter_primaldual=10,
-        use_random_sampling=True,
+        use_random_sampling=False,
         num_trial_move_samples=300,
         min_displacement_norm=0.1,
         planar_std_threshold=0.1,
