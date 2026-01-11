@@ -452,7 +452,7 @@ for i in range(num_vehicles):
 
 # ===================== Trajectories (now x0s exists) =====================
 
-v_cmd_fns = coordinator.get_v_cmd_fns()
+v_cmd_fns = coordinator.get_transport_vel_fns()
 trajectories = [
     VelocityReference(v_cmd_fns[i], x0s[i]["x"])
     for i in range(num_vehicles)
