@@ -241,10 +241,12 @@ class DootCbfCoordinator:
             diffs = positions_2d - position_2d                              # (N,2)
             dists = np.linalg.norm(diffs, axis=1)        # (N,)
 
-            neigh_mask = (dists <= radius) & (dists > 0.0)
+            neigh_mask = (dists <= radius) & (dists >= 0.0)
 
+
+            # C = 2*pi*bw^2 * (1 - exp(-R^2 / (2*bw^2)));
             kde_norm_const_2d_truncated = (
-                2.0 * np.pi * bw**2 * (1.0 - np.exp(-0.5))
+                2.0 * np.pi * bw**2 * (1.0 - np.exp(-radius**2 / (2*bw**2)))
             )
 
             if not np.any(neigh_mask):
@@ -537,6 +539,93 @@ class DootCbfCoordinator:
         self._positions_prev_cbf = positions.copy()
 
 
+def compute_kde_density_and_gradient(
+        positions_prev: np.ndarray,
+        vehicle_idx: int,
+        num_vehicles: int,
+        bw: float,
+        radius: float,
+        *,
+        planar: bool,
+        axes_2d: Optional[Tuple[int, int]],
+    ) -> Tuple[float, np.ndarray]:
+        """
+        KDE rho and grad_rho at agent vehicle_idx using previous positions, consistent with DOOT plane.
+
+        If planar=True:
+        - compute KDE in the DOOT plane defined by axes_2d (two indices in {0,1,2})
+        - return a (3,) gradient with nonzeros only on axes_2d
+
+        If planar=False:
+        - compute KDE in 3D and return full (3,) gradient
+        """
+        positions_prev = np.asarray(positions_prev, dtype=float)
+        if positions_prev.shape != (num_vehicles, 3):
+            raise ValueError(f"positions_prev must have shape {(num_vehicles, 3)}, got {positions_prev.shape}")
+        if not (0 <= vehicle_idx < num_vehicles):
+            raise IndexError(f"vehicle_idx out of range: {vehicle_idx}")
+
+        if planar:
+            if axes_2d is None or len(axes_2d) != 2:
+                raise ValueError("planar=True requires axes_2d=(i,j).")
+
+            # --- work in the selected 2D plane ---
+            positions_2d = positions_prev[:, axes_2d]                      # (N,2)
+            position_2d = positions_prev[vehicle_idx, axes_2d]            # (2,)
+            diffs = positions_2d - position_2d                              # (N,2)
+            dists = np.linalg.norm(diffs, axis=1)        # (N,)
+
+            neigh_mask = (dists <= radius ) & (dists >= 0.0)
+
+            kde_norm_const_2d_truncated = (
+                2.0 * np.pi * bw**2 * (1.0 - np.exp(-radius**2 / (2*bw**2)))
+            )
+
+            if not np.any(neigh_mask):
+                rho_m = 0.0
+                grad_2d = np.zeros((2,), dtype=float)
+            else:
+                diffs_k = diffs[neigh_mask]                          # (K,2)
+                dists_k = dists[neigh_mask]                          # (K,)
+                w = np.exp(-(dists_k ** 2) / (2.0 * (bw ** 2)))      # (K,)
+
+                rho_m = float(np.sum(w) / (float(num_vehicles) * kde_norm_const_2d_truncated))
+
+                grad_2d = -(1.0 / (float(num_vehicles) * kde_norm_const_2d_truncated * (bw ** 2))) * np.sum(
+                    diffs_k * w[:, None], axis=0
+                )
+
+            grad_3d = np.zeros((3,), dtype=float)
+            grad_3d[axes_2d[0]] = grad_2d[0]
+            grad_3d[axes_2d[1]] = grad_2d[1]
+            return rho_m, grad_3d
+
+        else:
+            # --- 3D KDE ---
+            diffs = positions_prev - positions_prev[vehicle_idx, :]                 # (N,3)
+            dists = np.linalg.norm(diffs, axis=1)         # (N,)
+            neigh_mask = (dists <= radius) & (dists > 0.0)
+
+            # 3D Gaussian normalization
+            kde_norm_const_3d_truncated = (2.0 * np.pi) ** (1.5) * (bw ** 3)
+
+            if not np.any(neigh_mask):
+                rho_m = 0.0
+                grad_3d = np.zeros((3,), dtype=float)
+            else:
+                diffs_k = diffs[neigh_mask]                          # (K,3)
+                dists_k = dists[neigh_mask]                          # (K,)
+                w = np.exp(-(dists_k ** 2) / (2.0 * (bw ** 2)))      # (K,)
+
+                rho_m = float(np.sum(w) / (float(num_vehicles) * kde_norm_const_3d_truncated))
+
+                grad_3d = -(1.0 / (float(num_vehicles) * kde_norm_const_3d_truncated * (bw ** 2))) * np.sum(
+                    diffs_k * w[:, None], axis=0
+                )
+
+            return rho_m, grad_3d
+
+
 def unit_test_01():
     import copy
     import os
@@ -697,7 +786,7 @@ def unit_test_02():
     dt = 1
     intervals = int(sim_time / dt)
 
-    rng = np.random.default_rng()
+    rng = np.random.default_rng(10)
 
     # =========================
     # Target distribution
@@ -744,7 +833,7 @@ def unit_test_02():
     # =========================
     doot_config = DootConfig(
         num_neighbors=min(10, num_vehicles - 1),
-        max_iter_primaldual=10,
+        max_iter_primaldual=20,
         use_random_sampling=False,
         num_trial_move_samples=300,
         min_displacement_norm=0.1,
@@ -752,10 +841,10 @@ def unit_test_02():
     )
 
     cbf_config = CbfConfig(
-        density_upper_gain=1.0,
-        density_lower_gain=1.0,
+        density_upper_gain=100.0,
+        density_lower_gain=1000.0,
         density_upper_bound=0.045,
-        density_lower_bound=0.01,
+        density_lower_bound=0.011,
         kde_bandwidth=0.3,
     )
 
@@ -801,6 +890,7 @@ def unit_test_02():
         facecolors=(1.0, 0.8, 0.2),
         edgecolors=(1.0, 0.6, 0.0),
         linewidths=1.5,
+        alpha=0.4,
         zorder=3,
     )
     sparse_r = ax_r.scatter(
@@ -808,6 +898,7 @@ def unit_test_02():
         facecolors=(1.0, 0.8, 0.2),
         edgecolors=(1.0, 0.6, 0.0),
         linewidths=1.5,
+        alpha=0.4,
         zorder=3,
     )
 
@@ -860,7 +951,8 @@ def unit_test_02():
         v_cbf = v_nom.copy()
         for vehicle_idx in range(num_vehicles):
             rho_m, grad_rho_m = coordinator._compute_kde_density_and_gradient(
-                x_prev_cbf, vehicle_idx, planar=planar_cbf, axes_2d=axes_2d_cbf
+                x_prev_cbf, vehicle_idx,
+                planar=planar_cbf, axes_2d=axes_2d_cbf
             )
             v_cbf[vehicle_idx, :] = coordinator._apply_cbf_projection(v_nom[vehicle_idx, :], rho_m, grad_rho_m)
         v_cbf[:, 2] = 0.0
@@ -878,11 +970,17 @@ def unit_test_02():
         scatL.set_offsets(xy_nom)
         scatR.set_offsets(xy_cbf)
 
+        # Extract the position for KDE density calculation
+        x_cur_nom = np.array([cur_nom[i]["x"] for i in range(num_vehicles)], dtype=float)
+        x_cur_cbf = np.array([cur_cbf[i]["x"] for i in range(num_vehicles)], dtype=float)
+
         # ---- KDE-based overlays (computed from X_prev_*) ----
         rho_nom = np.array(
             [
-                coordinator._compute_kde_density_and_gradient(
-                    x_prev_nom, vehicle_idx, planar=planar_nom, axes_2d=axes_2d_nom
+                compute_kde_density_and_gradient(
+                    x_cur_nom, vehicle_idx, num_vehicles,
+                    cbf_config.kde_bandwidth, cbf_config.kde_radius_bar,
+                    planar=planar_nom, axes_2d=axes_2d_nom
                 )[0]
                 for vehicle_idx in range(num_vehicles)
             ],
@@ -890,8 +988,10 @@ def unit_test_02():
         )
         rho_cbf = np.array(
             [
-                coordinator._compute_kde_density_and_gradient(
-                    x_prev_cbf, vehicle_idx, planar=planar_cbf, axes_2d=axes_2d_cbf
+                compute_kde_density_and_gradient(
+                    x_cur_cbf, vehicle_idx, num_vehicles,
+                    cbf_config.kde_bandwidth, cbf_config.kde_radius_bar,
+                    planar=planar_cbf, axes_2d=axes_2d_cbf
                 )[0]
                 for vehicle_idx in range(num_vehicles)
             ],
