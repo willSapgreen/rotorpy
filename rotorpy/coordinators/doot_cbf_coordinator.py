@@ -423,39 +423,60 @@ class DootCbfCoordinator:
         count = np.bincount(nearest_agent, minlength=self.num_vehicles).astype(float) / float(num_targeted_pos)
 
         # ------------------------------------------------------------
-        # 2) Neighbor graph + Laplacian from agent kNN (excluding self)
+        # 2) Neighbor graph + Laplacian
         # ------------------------------------------------------------
-        k = int(self.doot_config.num_neighbors)
-        if k >= self.num_vehicles:
-            # Excluding self, max meaningful neighbors is num_vehicles-1
-            k = self.num_vehicles - 1
+        n_neigh = int(self.doot_config.num_neighbors)
+        if n_neigh < 2:
+            raise ValueError("doot_config.num_neighbors must be >= 2 to (includes self then drops).")
 
-        # TODO: If the agents’ distribution is non-planar, the difference in the z-coordinate must be taken into account.
-        diff_aa = positions_2d[:, None, :] - positions_2d[None, :, :]        # (num_vehicles,num_vehicles,dim)
-        d2_aa = np.sum(diff_aa * diff_aa, axis=2)        # (num_vehicles,num_vehicles)
-        np.fill_diagonal(d2_aa, np.inf)
+	# TODO: If the agents’ distribution is non-planar, the difference in the z-coordinate must be taken into account.
+        # K including self (MATLAB knnsearch K=n_neigh includes self)
+        K_including_self = min(n_neigh, self.num_vehicles)
+        k = K_including_self - 1  # neighbors excluding self (MATLAB uses 2:n_neigh)
 
-        # kth index safety when num_vehicles is small
-        kth = min(k - 1, self.num_vehicles - 2) if self.num_vehicles >= 2 else 0
-        nn_idx = np.argpartition(d2_aa, kth=kth, axis=1)[:, :k]  # (num_vehicles,k)
+        # Pairwise squared distances INCLUDING self
+        diff_aa = positions_2d[:, None, :] - positions_2d[None, :, :]        # (N,N,dim)
+        d2_aa = np.sum(diff_aa * diff_aa, axis=2)                            # (N,N)
 
-        # Build Laplacian graph
+        # Ensure self is always in the K slice
+        np.fill_diagonal(d2_aa, -np.inf)
+
+        # Unordered K-candidate set (includes self); then we sort within the set by distance
+        kth = min(K_including_self - 1, self.num_vehicles - 1)
+        nn_full = np.argpartition(d2_aa, kth=kth, axis=1)[:, :K_including_self]  # (N,K_including_self)
+
+        # Drop self and keep the closest k non-self neighbors (MATLAB columns 2..n_neigh)
+        nn_idx_list = []
+        for i in range(self.num_vehicles):
+            row = nn_full[i]
+            row = row[np.argsort(d2_aa[i, row])]       # sort candidates by distance
+            row_wo_self = row[row != i]               # drop self
+            nn_idx_list.append(row_wo_self[:k])       # take k neighbors
+
+        nn_idx = np.stack(nn_idx_list, axis=0)        # (N,k)
+
+        # Directed adjacency A (N x N)
         adjacency_directed = np.zeros((self.num_vehicles, self.num_vehicles), dtype=float)
         rows = np.repeat(np.arange(self.num_vehicles), k)
         cols = nn_idx.reshape(-1)
         adjacency_directed[rows, cols] = 1.0
 
-        # Symmetrize k-NN graph
-        adjacency_undirected = 0.5 * (adjacency_directed + adjacency_directed.T)
+        W = 0.5 * (adjacency_directed + adjacency_directed.T)                # values in {0, 0.5, 1}
 
-        degree_matrix = np.diag(np.sum(adjacency_undirected, axis=1))
-        laplacian = degree_matrix - adjacency_undirected
+        # UNWEIGHTED Laplacian of structural adjacency
+        A_struct = (W > 0.0).astype(float)                                   # {0,1}
+        degree_matrix = np.diag(np.sum(A_struct, axis=1))
+        laplacian = degree_matrix - A_struct
+
+        # DEBUG: cache what step() actually used
+        self._dbg_last_count = count.copy()
+        self._dbg_last_laplacian = laplacian.copy()
 
         # ------------------------------------------------------------
         # 3) Primal–dual inner iterations updating phi
         # ------------------------------------------------------------
         normalization = 1.0 / float(self.num_vehicles)
-        gain = 1.0 / float(k + 1)
+        gain = 1.0 / float(n_neigh + 1)
 
         phi = self.phi
         for _ in range(int(self.doot_config.max_iter_primaldual)):
