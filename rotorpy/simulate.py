@@ -350,7 +350,21 @@ def simulate_swarm(world, wind_profile,
 
     return (times, states, controls, flats, imu_measurements, imu_gts, mocap_measurements, state_estimates, exit_statuses)
 
-def simulate(world, initial_state, vehicle, controller, trajectory, wind_profile, imu, mocap, estimator, t_final, t_step, safety_margin, use_mocap, terminate=None, print_fps=False):
+def simulate(world,
+             initial_state,
+             vehicle,
+             controller,
+             trajectory,
+             wind_profile,
+             imu,
+             mocap,
+             estimator,
+             t_final,
+             t_step,
+             safety_margin,
+             use_mocap,
+             terminate=None,
+             print_fps=False):
     """
     Perform a vehicle simulation and return the numerical results.
 
