@@ -16,6 +16,9 @@ from rotorpy.sensors.imu import Imu, BatchedImu
 from rotorpy.sensors.external_mocap import MotionCapture
 from rotorpy.estimators.nullestimator import NullEstimator
 
+# SETTINGS
+# Based on if you want to use GPU or CPU for simulation. CPU is faster for smaller batch sizes.
+USE_CPU = False  # Toggle this for CPU/GPU testing
 
 def main():
     # This prevents pytorch from spawning multiple threads. Commenting this line out can improve performance
@@ -23,36 +26,50 @@ def main():
     # e.g. with the multiprocessing python module.
     torch.set_num_threads(1)
 
-    # set based on if you want to use GPU or CPU for simulation. CPU is faster for smaller batch sizes.
-    # device = torch.device("cuda:0")
-    device = torch.device("cpu")
+    print(f"==== Batched version ====")
+
+    if USE_CPU:
+        device = torch.device("cpu")
+    else:
+        if torch.cuda.is_available():
+            device = torch.device(f"cuda:{torch.cuda.current_device()}")  # typically cuda:0
+        else:
+            device = torch.device("cpu")
+
+
+    print(f"Using device: {device}")
 
     # How many drones to simulate in parallel. Up to a limit, increasing this value increases the efficiency (average FPS)
     # of the simulation. How many you can simulate in parallel efficiently will depend on your machine.
-    num_drones = 50
+    num_drones = 200
+    dtype = torch.float64
 
     #### Initial Drone States ####
     # We create initial states for each drone in the batch.
     # In this case, we're setting the initial state of every drone to be basically 0.
-    # Note that we're going to be working in torch (as opposed to numpy in standard RotorPy), and using the double type.
+    # Note that we're going to be working in torch (as opposed to numpy in standard RotorPy)
     init_rotor_speed = 1788.53
-    x0 = {'x': torch.zeros(num_drones,3, device=device).double(),
-          'v': torch.zeros(num_drones, 3, device=device).double(),
-          'q': torch.tensor([0, 0, 0, 1], device=device).repeat(num_drones, 1).double(),
-          'w': torch.zeros(num_drones, 3, device=device).double(),
-          'wind': torch.zeros(num_drones, 3, device=device).double(),
-          'rotor_speeds': torch.tensor([init_rotor_speed, init_rotor_speed, init_rotor_speed, init_rotor_speed], device=device).repeat(num_drones, 1).double()}
+    x0 = {
+        'x': torch.zeros(num_drones, 3, device=device, dtype=dtype),
+        'v': torch.zeros(num_drones, 3, device=device, dtype=dtype),
+        'q': torch.tensor([0, 0, 0, 1], device=device, dtype=dtype).repeat(num_drones, 1),
+        'w': torch.zeros(num_drones, 3, device=device, dtype=dtype),
+        'wind': torch.zeros(num_drones, 3, device=device, dtype=dtype),
+        'rotor_speeds': torch.tensor([init_rotor_speed]*4, device=device, dtype=dtype).repeat(num_drones, 1)
+    }
 
+    # Forces the tensors to the exact device object instance.
+    for key in x0:
+        if isinstance(x0[key], torch.Tensor):
+            x0[key] = x0[key].to(device)
 
     #### Generate Trajectories ####
+    # when interfacing with some of the standard rotorpy hardware, you'll have to convert from torch -> numpy.
     world = World({"bounds": {"extents": [-10, 10, -10, 10, -10, 10]}, "blocks": []})
     num_waypoints = 4
     v_avg_des = 2.0
-
-    # when interfacing with some of the standard rotorpy hardware, you'll have to convert from torch -> numpy.
     positions = x0['x'].cpu().numpy()
     trajectories = []
-    ref_traj_gen_start_time = time.time()
 
     # Generate the same trajectories each time.
     np.random.seed(10)
@@ -75,15 +92,14 @@ def main():
     all_quad_params = [cf_quad_params]*(num_drones//2) + [hb_quad_params]*(num_drones//2)
 
     # Optional: specify feedback gains for each drone in the batch. (can be different for each drone)
-    kp_pos = torch.tensor([6.5, 6.5, 15]).repeat(num_drones, 1).double()
-    kd_pos = torch.tensor([4.0, 4.0, 9]).repeat(num_drones, 1).double()
-    kp_att = torch.tensor([544]).repeat(num_drones, 1).double()
-    kd_att = torch.tensor([46.64]).repeat(num_drones, 1).double()
+    kp_pos = torch.tensor([6.5, 6.5, 15], device=device, dtype=dtype).repeat(num_drones, 1)
+    kd_pos = torch.tensor([4.0, 4.0, 9], device=device, dtype=dtype).repeat(num_drones, 1)
+    kp_att = torch.tensor([544.0], device=device, dtype=dtype).repeat(num_drones, 1)
+    kd_att = torch.tensor([46.64], device=device, dtype=dtype).repeat(num_drones, 1)
 
     # Collate all the individual MinSnap objects into a single BatchedMinSnap object, which allows us to compute
     # reference commands for all trajectories at the same time.
     batched_trajs = BatchedMinSnap(trajectories, device=device)
-    print(f"Time to Generate reference trajectories: {time.time() - ref_traj_gen_start_time}")
 
     # Define this object which contains dynamics params for each of the drones.
     # If the batch size is large, this can save memory by sharing the dynamics params across the controller and
@@ -93,19 +109,16 @@ def main():
     # Define a batched controller object which lets us compute control inputs for all drones in the batch at the
     # same time. Note that currently, all drones in the batch must share the same quad_params.
     controller = BatchedSE3Control(batch_params, num_drones, device=device,
-                                   kp_pos=kp_pos,
-                                   kd_pos=kd_pos,
-                                   kp_att=kp_att,
-                                   kd_att=kd_att)
+                                   kp_pos=kp_pos, kd_pos=kd_pos,
+                                   kp_att=kp_att, kd_att=kd_att)
 
     # Define a batched multirotor, which simulates all drones in the batch simultaneously.
     # Choose 'dopri5' to mimic scipy's default solve_ivp behavior with an adaptive step size, or 'rk4'
     # for a fixed step-size integrator, which is lower-fidelity but much faster.
     vehicle = BatchedMultirotor(batch_params, num_drones, x0, device=device, integrator='dopri5', control_abstraction=control_abstraction)
 
-    dt = 0.01
-
     # Optional: define when each drone in the batch should terminate.
+    dt = 0.01
     t_fs = np.array([trajectory.t_keyframes[-1] for trajectory in trajectories])
 
     # Define a wind profile -- for batched drones, only NoWind and ConstantWind are supported rn.
@@ -118,7 +131,7 @@ def main():
     sim_fn_start_time = time.time()
     results = simulate_batch(world, x0, vehicle, controller, batched_trajs, wind_profile, batched_imu, t_fs, dt, 0.25, print_fps=False)
     sim_fn_end_time = time.time()
-    print(f"time to simulate {num_drones} batched using simulate_batch() fn: {sim_fn_end_time - sim_fn_start_time}")
+    print(f"Time to simulate {num_drones} batched: {sim_fn_end_time - sim_fn_start_time:.4f}s")
 
     # A dict containing arrays of shape (N, num_drones, ...), where N is the number of timesteps it took for the
     # last drone to terminate. Has the same keys as the state dict returned by the standard simulate() function.
@@ -126,12 +139,13 @@ def main():
 
     # Contains the timesteps at which each drone terminated.
     simulate_fn_done_times = results[-1]
-    print(f"FPS of batched simulation was {np.sum(simulate_fn_done_times)/(sim_fn_end_time - sim_fn_start_time)}")
+    print(f"FPS of batched simulation: {np.sum(simulate_fn_done_times)/(sim_fn_end_time - sim_fn_start_time):.2f}")
 
     # Contains the exit statuses for each drone.
     exit_statuses = results[-2]
 
     #### Sequential Simulation ####
+    print(f"==== Sequential Version ====")
     # For comparison, we'll also simulate a standard Multirotor.
     x0_single = {'x': np.array([0, 0, 0]),
                  'v': np.zeros(3, ),
@@ -141,6 +155,7 @@ def main():
                  'rotor_speeds': np.array([1788.53, 1788.53, 1788.53, 1788.53])}
 
     all_seq_states = []
+
     mocap_params = {'pos_noise_density': 0.0005*np.ones((3,)),  # noise density for position
                     'vel_noise_density': 0.0010*np.ones((3,)),          # noise density for velocity
                     'att_noise_density': 0.0005*np.ones((3,)),          # noise density for attitude
@@ -155,6 +170,7 @@ def main():
     series_start_time = time.time()
     total_time = 0
     total_frames = 0
+
     for d in range(num_drones):
         controller_single = SE3Control(all_quad_params[d])
         vehicle_single = Multirotor(all_quad_params[d], initial_state=x0_single, control_abstraction=control_abstraction)
@@ -166,44 +182,46 @@ def main():
         all_seq_states.append(single_result[1])
         total_frames += len(single_result[0])
         total_time += time.time() - start_time
-    print(f"time to simulate {num_drones} sequentially: {time.time() - series_start_time}")
-    print(f"average fps of series simulation was {total_frames/total_time}")
 
-    ### Comparisons ###
-    # Plot positions and body rates of 3 random drones and compare the batched/sequential simulations.
+    print(f"Time to simulate {num_drones} sequentially: {time.time() - series_start_time:.4f}s")
+    print(f"Average FPS of sequential simulation: {total_frames/total_time:.2f}")
+
+    ### Comparison Plots ###
     num_to_plot = 3
-    fig, ax = plt.subplots(num_to_plot, 3)
+    fig, ax = plt.subplots(num_to_plot, 3, figsize=(12, 8))
+    fig2, ax2 = plt.subplots(num_to_plot, 3, figsize=(12, 8))
+
     which_sim = np.random.choice(num_drones, num_to_plot, replace=False)
-    dims = ["x (m)", "y (m)", "z (m)"]
-    for j, sim_idx in enumerate(which_sim):
-        ts = np.arange(trajectories[sim_idx].t_keyframes[-1]+dt, step=dt)
-        print(
-            f"All values of state after tstep {simulate_fn_done_times[sim_idx]} for drone {sim_idx} are NaN: {np.all(np.isnan(simulate_fn_states['x'][simulate_fn_done_times[sim_idx]:, int(sim_idx)]))}")
-        for dimension in range(3):
-            ax[j][dimension].plot(ts, [trajectories[sim_idx].update(t)['x'][dimension] for t in ts], label='reference')
-            ax[j][dimension].plot(ts, all_seq_states[int(sim_idx)]['x'][:,dimension], label='sequential')
-            # Note that we are using ":simulate_fn_done_times[sim_idx]" to get only the states for this drone.
-            # for timesteps > simulate_fn_done_times[sim_idx], the states will be nan for this drone.
-            ax[j][dimension].plot(ts, simulate_fn_states['x'][:simulate_fn_done_times[sim_idx], int(sim_idx), dimension], label='batched')
-            ax[j][dimension].legend()
-            ax[j][dimension].set_ylabel(dims[dimension])
-            ax[j][dimension].set_xlabel("Time (s)")
-    fig.tight_layout()
 
-    # Plot Body Rates
-    fig2, ax2 = plt.subplots(num_to_plot, 3)
-    dims = ["w_x", "w_y", "w_z"]
+    def get_data(state_dict, key, drone_idx, end_time, dim):
+        """Safely extracts and converts data regardless of device/type."""
+        data = state_dict[key][:end_time, int(drone_idx), dim]
+        if hasattr(data, 'detach'): # Check if it's a torch tensor
+            return data.detach().cpu().numpy()
+        return data # Already numpy
+
+    # Plot Positions & Body Rates
     for j, sim_idx in enumerate(which_sim):
-        ts = np.arange(trajectories[sim_idx].t_keyframes[-1]+dt, step=dt)
+        ts = np.arange(trajectories[sim_idx].t_keyframes[-1] + dt, step=dt)
+        end_t = simulate_fn_done_times[sim_idx]
+
         for dimension in range(3):
-            ax2[j][dimension].plot(ts, all_seq_states[int(sim_idx)]['w'][:,dimension], label='sequential')
-            ax2[j][dimension].plot(ts, simulate_fn_states['w'][:simulate_fn_done_times[sim_idx], int(sim_idx), dimension], label='batched')
-            ax2[j][dimension].legend()
-            ax2[j][dimension].set_ylabel(dims[dimension])
-            ax[j][dimension].set_xlabel("Time (s)")
-    fig.tight_layout()
+            # Position Plot (fig 1)
+            ax[j][dimension].plot(ts, [trajectories[sim_idx].update(t)['x'][dimension] for t in ts], 'k--', alpha=0.5, label='ref')
+            ax[j][dimension].plot(ts, all_seq_states[int(sim_idx)]['x'][:,dimension], label='seq')
+            ax[j][dimension].plot(ts, get_data(simulate_fn_states, 'x', sim_idx, end_t, dimension), label='batch')
+
+            # Body Rate Plot (fig 2)
+            ax2[j][dimension].plot(ts, all_seq_states[int(sim_idx)]['w'][:,dimension], label='seq')
+            ax2[j][dimension].plot(ts, get_data(simulate_fn_states, 'w', sim_idx, end_t, dimension), label='batch')
+
+            if j == 0:
+                ax[j][dimension].legend()
+                ax2[j][dimension].legend()
+
+    fig.suptitle("Position Comparison")
+    fig2.suptitle("Body Rate Comparison")
     plt.show()
-
 
 if __name__ == "__main__":
     main()
