@@ -461,7 +461,7 @@ def run_world(args):
         for i in range(num_vehicles)
     ]
 
-    # ===================== Environment =====================
+    # ===================== EnvironmentSwarm =====================
 
     sim_instance = EnvironmentSwarm(
         vehicles=vehicles,

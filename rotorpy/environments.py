@@ -251,7 +251,6 @@ class EnvironmentSwarm():
         return self.result
 
 
-
     def save_to_csv(self, savepath=None):
         """
         Save the simulation data in self.results to a file.
