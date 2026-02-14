@@ -61,15 +61,48 @@ world = World.from_file(os.path.abspath(os.path.join(os.path.dirname(__file__),'
 
 # "world" is an optional argument. If you don't load a world it'll just provide an empty playground!
 
+# Initialize IMU
+sim_rate = 100
+accelerometer_params = {
+      'initial_bias': np.array([0, 0, 0]),  # m/s^2
+      'noise_density': (0.38**2) * np.ones(3,),  # m/s^2 / sqrt(Hz)
+      'random_walk': np.zeros(3,)  # m/s^2 * sqrt(Hz)
+}
+gyroscope_params = {
+      'initial_bias': np.array([0, 0, 0]),  # rad/s
+      'noise_density': (0.01**2) * np.ones(3,),  # rad/s / sqrt(Hz)
+      'random_walk': np.zeros(3,)  # rad/s * sqrt(Hz)
+}
+imu = Imu(accelerometer_params,
+            gyroscope_params,
+            p_BS=np.zeros(3,),
+            R_BS=np.eye(3),
+            sampling_rate=sim_rate)
+
+# Initialize motion capturer
+mocap_params={'pos_noise_density':  np.zeros(3),  # noise density for position
+                  'vel_noise_density':  np.zeros(3),          # noise density for velocity
+                  'att_noise_density':  np.zeros(3),          # noise density for attitude
+                  'rate_noise_density': np.zeros(3),         # noise density for body rates
+                  'vel_artifact_max': 5,                              # maximum magnitude of the artifact in velocity (m/s)
+                  'vel_artifact_prob': 0,                         # probability that an artifact will occur for a given velocity measurement
+                  'rate_artifact_max': 1,                             # maximum magnitude of the artifact in body rates (rad/s)
+                  'rate_artifact_prob': 0                        # probability that an artifact will occur for a given rate measurement
+                }
+mocap = MotionCapture(sampling_rate=100, mocap_params=mocap_params, with_artifacts=False)
+
+# Initialize wind estimator
+wind_ukf = WindUKF(quad_params)
+
 # An instance of the simulator can be generated as follows:
 sim_instance = Environment(vehicle=Multirotor(quad_params),           # vehicle object, must be specified.
                            controller=SE3Control(quad_params),        # controller object, must be specified.
                            trajectory=TwoDLissajous(),                # trajectory object, must be specified.
                            wind_profile=SinusoidWind(),               # OPTIONAL: wind profile object, if none is supplied it will choose no wind.
                            sim_rate     = 100,                        # OPTIONAL: The update frequency of the simulator in Hz. Default is 100 Hz.
-                           imu          = None,                       # OPTIONAL: imu sensor object, if none is supplied it will choose a default IMU sensor.
-                           mocap        = None,                       # OPTIONAL: mocap sensor object, if none is supplied it will choose a default mocap.
-                           estimator    = None,                       # OPTIONAL: estimator object
+                           imu          = imu,                        # OPTIONAL: imu sensor object, if none is supplied it will choose a default IMU sensor.
+                           mocap        = mocap,                      # OPTIONAL: mocap sensor object, if none is supplied it will choose a default mocap.
+                           estimator    = wind_ukf,                   # OPTIONAL: estimator object
                            world        = world,                      # OPTIONAL: the world, same name as the file in rotorpy/worlds/, default (None) is empty world
                            safety_margin= 0.25                        # OPTIONAL: defines the radius (in meters) of the sphere used for collision checking
                        )
@@ -97,7 +130,7 @@ sim_instance.vehicle.initial_state = x0
 # You can save the animation (if animating) using the fname argument. Default is None which won't save it.
 
 results = sim_instance.run(t_final      = 20,       # The maximum duration of the environment in seconds
-                           use_mocap    = False,       # Boolean: determines if the controller should use the motion capture estimates.
+                           use_mocap    = True,       # Boolean: determines if the controller should use the motion capture estimates.
                            terminate    = False,       # Boolean: if this is true, the simulator will terminate when it reaches the last waypoint.
                            plot            = True,     # Boolean: plots the vehicle states and commands
                            plot_mocap      = True,     # Boolean: plots the motion capture pose and twist measurements
