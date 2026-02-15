@@ -573,7 +573,7 @@ def simulate_batch(world,
                    imu,
 
                    mocap,
-                   #estimator,
+                   estimator,
 
                    t_final,
                    t_step,
@@ -673,6 +673,9 @@ def simulate_batch(world,
     statedot = vehicles.statedot(state[-1], control[-1], t_step, running_idxs.flatten())
     imu_measurements = [imu.measurement(state[-1], statedot, with_noise=True)]
     imu_gt = [imu.measurement(state[-1], statedot, with_noise=False)]
+
+    state_estimate = [estimator.step(state[0], control[0], imu_measurements[0], mocap_measurements[0])]
+
     step = 0
     total_num_frames = 0
     total_time = 0
@@ -702,6 +705,7 @@ def simulate_batch(world,
         flat.append(trajectories.update(time_array[-1]))
 
         mocap_measurements.append(mocap.measurement(state[-1], with_noise=True, with_artifacts=mocap.with_artifacts))
+        state_estimate.append(estimator.step(state[-1], control[-1], imu_measurements[-1], mocap_measurements[-1]))
 
         if use_mocap:
             control.append(controller.update(time_array[-1], mocap_measurements[-1], flat[-1], idxs=running_idxs.flatten()))
@@ -719,7 +723,7 @@ def simulate_batch(world,
             print(f"FPS at step {step} = {fps}")
     if print_fps:
         print(f"Average FPS of batched simulation was {total_num_frames/total_time}")
-    
+
     # Pack the output
     time_array    = np.array(time_array, dtype=float)
     state   = merge_dicts_batch(state)
@@ -728,21 +732,23 @@ def simulate_batch(world,
     mocap_measurements = merge_dicts_batch(mocap_measurements)
     control         = merge_dicts_batch(control)
     flat            = merge_dicts_batch(flat)
-    return (time_array, state, control, flat, imu_measurements, imu_gt, mocap_measurements, exit_status, exit_timesteps)
+    state_estimate  = merge_dicts_batch(state_estimate)
+    return (time_array, state, control, flat, imu_measurements, imu_gt, mocap_measurements, state_estimate, exit_status, exit_timesteps)
 
 
 def merge_dicts_batch(dicts_in):
-    """
-    Concatenates contents of a list of N state dicts into a single dict by
-    prepending a new dimension of size N. This is more convenient for plotting
-    and analysis. Requires dicts to have consistent keys and have values that
-    are numpy arrays.
-    """
     dict_out = {}
     for k in dicts_in[0].keys():
         dict_out[k] = []
         for d in dicts_in:
-            dict_out[k].append(d[k].cpu().numpy())
+            val = d[k]
+            # Check if it's a tensor; otherwise, keep it as is
+            if torch.is_tensor(val):
+                dict_out[k].append(val.cpu().numpy())
+            else:
+                # This handles empty lists or other non-tensor types
+                dict_out[k].append(val)
+
         dict_out[k] = np.array(dict_out[k])
     return dict_out
 

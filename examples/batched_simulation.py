@@ -150,7 +150,7 @@ def main():
                              wind_profile,
                              batched_imu,
                              batched_mocap,
-
+                             NullEstimator(),
                              t_final=t_fs,
                              t_step=dt,
                              safety_margin=0.25,
@@ -201,9 +201,20 @@ def main():
         controller_single = SE3Control(all_quad_params[d])
         vehicle_single = Multirotor(all_quad_params[d], initial_state=x0_single, control_abstraction=control_abstraction)
         start_time = time.time()
-        single_result = simulate(world, x0_single, vehicle_single, controller_single, trajectories[d],
-                                 NoWind(), Imu(sampling_rate=int(1/dt)), mocap, NullEstimator(),
-                                 trajectories[d].t_keyframes[-1], dt, 0.25, use_mocap=False, print_fps=False)
+        single_result = simulate(world,
+                                 x0_single,
+                                 vehicle_single,
+                                 controller_single,
+                                 trajectories[d],
+                                 NoWind(),
+                                 Imu(sampling_rate=int(1/dt)),
+                                 mocap,
+                                 NullEstimator(),
+                                 trajectories[d].t_keyframes[-1],
+                                 dt,
+                                 0.25,
+                                 use_mocap=False,
+                                 print_fps=False)
 
         all_seq_states.append(single_result[1])
         total_frames += len(single_result[0])
