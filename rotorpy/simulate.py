@@ -479,6 +479,7 @@ def simulate(world,
         if print_fps:
             print(f"FPS is {fps}")
 
+    # Pack the output
     time    = np.array(time, dtype=float)
     state   = merge_dicts(state)
     imu_measurements = merge_dicts(imu_measurements)
@@ -570,16 +571,23 @@ def simulate_batch(world,
                    trajectories,
                    wind_profile,
                    imu,
+
+                   mocap,
+                   #estimator,
+
                    t_final,
                    t_step,
                    safety_margin,
+
+                   use_mocap,
+
                    terminate=None,
                    start_times=None,
                    print_fps=False):
     """
     Simultaneously performs many vehicle simulations and returns the numerical results.
     Note that, currently, compared to the normal simulate() function, simulate_batch() does not support
-    mocap, or the state estimator. See examples/batched_simulation.py for usage.
+    the state estimator. See examples/batched_simulation.py for usage.
 
     Inputs:
         world, a class representing the world it is flying in, including objects and world bounds.
@@ -589,6 +597,7 @@ def simulate_batch(world,
         trajectories, BatchedTrajectory object containing the trajectories to follow
         wind_profile, Batched Wind Profile object containing the wind generator.
         imu: BatchedIMU object
+        mocap: BatchedMotionCapture object
         t_final, array of maximum simulation durations for each vehicle in the batch, s
         t_step, float, the time between each step in the simulator, s (shared across drones)
         safety_margin, the radius of the ball surrounding the vehicle position to determine if a collision occurs
@@ -654,7 +663,13 @@ def simulate_batch(world,
     exit_timesteps = np.zeros(vehicles.num_drones, dtype=int)
     state   = [copy.deepcopy(initial_states)]
     flat    = [trajectories.update(time_array[-1])]
-    control = [controller.update(time_array[-1], state[-1], flat[-1], idxs=None)]
+
+    mocap_measurements = [mocap.measurement(state[-1], with_noise=True, with_artifacts=False)]
+    if use_mocap:
+        control = [controller.update(time_array[-1], mocap_measurements[-1], flat[-1], idxs=None)]
+    else:
+        control = [controller.update(time_array[-1], state[-1], flat[-1], idxs=None)]
+
     statedot = vehicles.statedot(state[-1], control[-1], t_step, running_idxs.flatten())
     imu_measurements = [imu.measurement(state[-1], statedot, with_noise=True)]
     imu_gt = [imu.measurement(state[-1], statedot, with_noise=False)]
@@ -685,7 +700,13 @@ def simulate_batch(world,
         state[-1]['wind'] = wind_profile.update(time_array[-1], state[-1]['x'])
         state.append(vehicles.step(state[-1], control[-1], t_step, idxs=running_idxs.flatten()))
         flat.append(trajectories.update(time_array[-1]))
-        control.append(controller.update(time_array[-1], state[-1], flat[-1], idxs=running_idxs.flatten()))
+
+        mocap_measurements.append(mocap.measurement(state[-1], with_noise=True, with_artifacts=mocap.with_artifacts))
+
+        if use_mocap:
+            control.append(controller.update(time_array[-1], mocap_measurements[-1], flat[-1], idxs=running_idxs.flatten()))
+        else:
+            control.append(controller.update(time_array[-1], state[-1], flat[-1], idxs=running_idxs.flatten()))
 
         statedot = vehicles.statedot(state[-1], control[-1], t_step, running_idxs.flatten())
         imu_measurements.append(imu.measurement(state[-1], statedot, running_idxs.flatten(), with_noise=True))
@@ -698,11 +719,16 @@ def simulate_batch(world,
             print(f"FPS at step {step} = {fps}")
     if print_fps:
         print(f"Average FPS of batched simulation was {total_num_frames/total_time}")
+    
+    # Pack the output
     time_array    = np.array(time_array, dtype=float)
     state   = merge_dicts_batch(state)
+    imu_measurements = merge_dicts_batch(imu_measurements)
+    imu_gt = merge_dicts_batch(imu_gt)
+    mocap_measurements = merge_dicts_batch(mocap_measurements)
     control         = merge_dicts_batch(control)
     flat            = merge_dicts_batch(flat)
-    return (time_array, state, control, flat, imu_measurements, imu_gt, exit_status, exit_timesteps)
+    return (time_array, state, control, flat, imu_measurements, imu_gt, mocap_measurements, exit_status, exit_timesteps)
 
 
 def merge_dicts_batch(dicts_in):

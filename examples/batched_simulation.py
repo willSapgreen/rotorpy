@@ -13,7 +13,7 @@ from rotorpy.world import World
 from rotorpy.wind.default_winds import NoWind, BatchedNoWind
 from rotorpy.simulate import simulate, simulate_batch
 from rotorpy.sensors.imu import Imu, BatchedImu
-from rotorpy.sensors.external_mocap import MotionCapture
+from rotorpy.sensors.external_mocap import MotionCapture, BatchedMotionCapture
 from rotorpy.estimators.nullestimator import NullEstimator
 
 # SETTINGS
@@ -127,9 +127,35 @@ def main():
     # Define a BatchedIMU object, which simulates noisy IMU measurements
     batched_imu = BatchedImu(num_drones, device=device)
 
+    # Define a BatchedMotionCapture object
+    mocap_params = {
+                "pos_noise_density": 0.0005 * torch.ones((3,)),
+                "vel_noise_density": 0.005 * torch.ones((3,)),
+                "att_noise_density": 0.0005 * torch.ones((3,)),
+                "rate_noise_density": 0.0005 * torch.ones((3,)),
+                "vel_artifact_max": 5.0,
+                "vel_artifact_prob": 0.001,
+                "rate_artifact_max": 1.0,
+                "rate_artifact_prob": 0.0002,
+            }
+    batched_mocap = BatchedMotionCapture(num_drones, sampling_rate=int(1/dt), mocap_params=mocap_params, with_artifacts=False, device=device)
+
     # Call the simulate_batch function, which will simulate all drones using the vectorized dynamics.
     sim_fn_start_time = time.time()
-    results = simulate_batch(world, x0, vehicle, controller, batched_trajs, wind_profile, batched_imu, t_fs, dt, 0.25, print_fps=False)
+    results = simulate_batch(world,
+                             x0,
+                             vehicle,
+                             controller,
+                             batched_trajs,
+                             wind_profile,
+                             batched_imu,
+                             batched_mocap,
+
+                             t_final=t_fs,
+                             t_step=dt,
+                             safety_margin=0.25,
+                             use_mocap=True,
+                             print_fps=False)
     sim_fn_end_time = time.time()
     print(f"Time to simulate {num_drones} batched: {sim_fn_end_time - sim_fn_start_time:.4f}s")
 
