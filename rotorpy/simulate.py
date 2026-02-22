@@ -571,16 +571,12 @@ def simulate_batch(world,
                    trajectories,
                    wind_profile,
                    imu,
-
                    mocap,
                    estimator,
-
                    t_final,
                    t_step,
                    safety_margin,
-
                    use_mocap,
-
                    terminate=None,
                    start_times=None,
                    print_fps=False):
@@ -704,7 +700,7 @@ def simulate_batch(world,
         state.append(vehicles.step(state[-1], control[-1], t_step, idxs=running_idxs.flatten()))
         flat.append(trajectories.update(time_array[-1]))
 
-        mocap_measurements.append(mocap.measurement(state[-1], with_noise=True, with_artifacts=mocap.with_artifacts))
+        mocap_measurements.append(mocap.measurement(state[-1], with_noise=True, with_artifacts=mocap.with_artifacts_mask))
         state_estimate.append(estimator.step(state[-1], control[-1], imu_measurements[-1], mocap_measurements[-1]))
 
         if use_mocap:

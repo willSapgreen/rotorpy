@@ -14,7 +14,43 @@ from rotorpy.wind.default_winds import NoWind, BatchedNoWind
 from rotorpy.simulate import simulate, simulate_batch
 from rotorpy.sensors.imu import Imu, BatchedImu
 from rotorpy.sensors.external_mocap import MotionCapture, BatchedMotionCapture
-from rotorpy.estimators.nullestimator import NullEstimator
+from rotorpy.estimators.wind_ekf import WindEKF, BatchedWindEKF
+from rotorpy.estimators.wind_ukf import WindUKF, BatchedWindUKF
+
+# Helpe func
+def convert_params_to_batched(all_params, device='cpu'):
+    num_drones = len(all_params)
+
+    # 1. Extract physical parameters into (N, 1) tensors
+    # We use a list comprehension to pull the values from your list of dicts
+    mass_list = [[d['mass']] for d in all_params]
+    cdx_list  = [[d['c_Dx']] for d in all_params]
+    cdy_list  = [[d['c_Dy']] for d in all_params]
+    cdz_list  = [[d['c_Dz']] for d in all_params]
+
+    # 2. Setup the output dictionary
+    quad_params = {
+        'mass': torch.tensor(mass_list, device=device).double(),
+        'c_Dx': torch.tensor(cdx_list, device=device).double(),
+        'c_Dy': torch.tensor(cdy_list, device=device).double(),
+        'c_Dz': torch.tensor(cdz_list, device=device).double(),
+    }
+
+    # 3. Add Filter Defaults (These are not in all_quad_params)
+    # Initial state (N, 9) - Starting level with near-zero velocity
+    quad_params['xhat0'] = torch.zeros((num_drones, 9), device=device).double()
+    quad_params['xhat0'][:, 3:6] = 0.01 # Prevent singularity in Jacobian
+
+    # Initial Covariance (N, 9, 9)
+    quad_params['P0'] = torch.eye(9, device=device).double().repeat(num_drones, 1, 1)
+
+    # Process Noise (N, 9, 9)
+    quad_params['Q'] = torch.eye(9, device=device).double().repeat(num_drones, 1, 1) * 0.1
+
+    # Measurement Noise (N, 9, 9)
+    quad_params['R'] = torch.eye(9, device=device).double().repeat(num_drones, 1, 1) * 0.01
+
+    return quad_params
 
 # SETTINGS
 # Based on if you want to use GPU or CPU for simulation. CPU is faster for smaller batch sizes.
@@ -41,7 +77,7 @@ def main():
 
     # How many drones to simulate in parallel. Up to a limit, increasing this value increases the efficiency (average FPS)
     # of the simulation. How many you can simulate in parallel efficiently will depend on your machine.
-    num_drones = 200
+    num_drones = 2000
     dtype = torch.float64
 
     #### Initial Drone States ####
@@ -128,17 +164,30 @@ def main():
     batched_imu = BatchedImu(num_drones, device=device)
 
     # Define a BatchedMotionCapture object
-    mocap_params = {
-                "pos_noise_density": 0.0005 * torch.ones((3,)),
-                "vel_noise_density": 0.005 * torch.ones((3,)),
-                "att_noise_density": 0.0005 * torch.ones((3,)),
-                "rate_noise_density": 0.0005 * torch.ones((3,)),
-                "vel_artifact_max": 5.0,
-                "vel_artifact_prob": 0.001,
-                "rate_artifact_max": 1.0,
-                "rate_artifact_prob": 0.0002,
-            }
-    batched_mocap = BatchedMotionCapture(num_drones, sampling_rate=int(1/dt), mocap_params=mocap_params, with_artifacts=False, device=device)
+    mocap_params_list = []
+    base_vel_artifact_prob = 0.001
+    for i in range(num_drones):
+        mp_i = {
+            "pos_noise_density": (0.0005 * torch.ones((3,), dtype=dtype)),
+            "vel_noise_density": (0.005 * torch.ones((3,), dtype=dtype)),
+            "att_noise_density": (0.0005 * torch.ones((3,), dtype=dtype)),
+            "rate_noise_density": (0.0005 * torch.ones((3,), dtype=dtype)),
+            "vel_artifact_max": torch.tensor(5.0, dtype=dtype),
+            "vel_artifact_prob": torch.tensor(base_vel_artifact_prob * (1.0 + 0.1 * i), dtype=dtype),
+            "rate_artifact_max": torch.tensor(1.0, dtype=dtype),
+            "rate_artifact_prob": torch.tensor(0.0002, dtype=dtype),
+        }
+        mocap_params_list.append(mp_i)
+    with_artifacts_list = [(i % 2) == 0 for i in range(num_drones)]
+    batched_mocap = BatchedMotionCapture(num_drones,
+        sampling_rate=int(1/dt),
+        mocap_params=mocap_params_list,
+        with_artifacts=with_artifacts_list,
+        device=device)
+
+    # Define a BatchedWindEKF object
+    batched_quad_params = convert_params_to_batched(all_quad_params, device=device)
+    batched_wind_ekf = BatchedWindUKF(num_drones, batched_quad_params, device=device)
 
     # Call the simulate_batch function, which will simulate all drones using the vectorized dynamics.
     sim_fn_start_time = time.time()
@@ -150,7 +199,7 @@ def main():
                              wind_profile,
                              batched_imu,
                              batched_mocap,
-                             NullEstimator(),
+                             batched_wind_ekf,
                              t_final=t_fs,
                              t_step=dt,
                              safety_margin=0.25,
@@ -182,6 +231,7 @@ def main():
 
     all_seq_states = []
 
+    # Initialize MotionCapture object
     mocap_params = {'pos_noise_density': 0.0005*np.ones((3,)),  # noise density for position
                     'vel_noise_density': 0.0010*np.ones((3,)),          # noise density for velocity
                     'att_noise_density': 0.0005*np.ones((3,)),          # noise density for attitude
@@ -200,6 +250,7 @@ def main():
     for d in range(num_drones):
         controller_single = SE3Control(all_quad_params[d])
         vehicle_single = Multirotor(all_quad_params[d], initial_state=x0_single, control_abstraction=control_abstraction)
+        wind_ekf = WindEKF(all_quad_params[d])
         start_time = time.time()
         single_result = simulate(world,
                                  x0_single,
@@ -209,7 +260,7 @@ def main():
                                  NoWind(),
                                  Imu(sampling_rate=int(1/dt)),
                                  mocap,
-                                 NullEstimator(),
+                                 wind_ekf,
                                  trajectories[d].t_keyframes[-1],
                                  dt,
                                  0.25,
