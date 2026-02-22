@@ -25,6 +25,9 @@ class ExitStatus(Enum):
     FLY_AWAY     = 'Failure: Your quadrotor is out of control; it flew away with a position error greater than 20 meters.'
     COLLISION    = 'Failure: Your quadrotor collided with an object.'
 
+
+########## SWARM SIMULATION ##########
+
 def simulate_swarm(world, wind_profile,
                    initial_states, vehicles, controllers, trajectories, imus, mocaps, estimators, terminates,
                    coordinators,
@@ -350,6 +353,9 @@ def simulate_swarm(world, wind_profile,
 
     return (times, states, controls, flats, imu_measurements, imu_gts, mocap_measurements, state_estimates, exit_statuses)
 
+
+########## SINGLE-VEHICLE SIMULATION ##########
+
 def simulate(world,
              initial_state,
              vehicle,
@@ -563,6 +569,8 @@ def safety_exit(world, margin, state, flat, control):
             return ExitStatus.COLLISION
     return None
 
+
+########## BATCHED SIMULATION ##########
 
 def simulate_batch(world,
                    initial_states,
