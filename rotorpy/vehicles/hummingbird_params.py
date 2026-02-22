@@ -1,11 +1,11 @@
 """
-Physical parameters for the AscTec Hummingbird. Values parameterize the inertia, motor dynamics, 
-rotor aerodynamics, parasitic drag, and rotor placement. 
+Physical parameters for the AscTec Hummingbird. Values parameterize the inertia, motor dynamics,
+rotor aerodynamics, parasitic drag, and rotor placement.
 Additional sources:
     https://digitalrepository.unm.edu/cgi/viewcontent.cgi?article=1189&context=ece_etds
     https://ieeexplore.ieee.org/stamp/stamp.jsp?arnumber=7991501
 Notes:
-    The k_d and k_z terms are an order of magnitude smaller because 10^-3 was too large. 
+    The k_d and k_z terms are an order of magnitude smaller because 10^-3 was too large.
 """
 import numpy as np
 
@@ -19,20 +19,20 @@ quad_params = {
     'Iyy':  3.68e-3,    # kg*m^2
     'Izz':  7.03e-3,    # kg*m^2
     'Ixy':  0.0,        # kg*m^2
-    'Iyz':  0.0,        # kg*m^2 
+    'Iyz':  0.0,        # kg*m^2
     'Ixz':  0.0,        # kg*m^2
 
     # Geometric properties, all vectors are relative to the center of mass.
     'num_rotors': 4,                        # for looping over each actuator
     'rotor_radius': 0.10,                   # rotor radius, in meters
-    'rotor_pos': {  
+    'rotor_pos': {
                     'r1': d*np.array([ 0.70710678118, 0.70710678118, 0]),    # Location of Rotor 1, meters
                     'r2': d*np.array([ 0.70710678118,-0.70710678118, 0]),    # Location of Rotor 2, meters
                     'r3': d*np.array([-0.70710678118,-0.70710678118, 0]),    # Location of Rotor 3, meters
                     'r4': d*np.array([-0.70710678118, 0.70710678118, 0]),    # Location of Rotor 4, meters
                  },
 
-    'rotor_directions': np.array([1,-1,1,-1]),  # This dictates the direction of the torque for each motor. 
+    'rotor_directions': np.array([1,-1,1,-1]),  # This dictates the direction of the torque for each motor.
 
     'rI': np.array([0,0,0]), # location of the IMU sensor, meters
 

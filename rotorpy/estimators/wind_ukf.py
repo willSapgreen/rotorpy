@@ -177,3 +177,195 @@ class WindUKF:
                        )
 
         return uk
+
+
+import torch
+
+class BatchedWindUKF:
+    def __init__(self, num_drones, quad_params, dt=1/100, device='cpu'):
+        """
+        Inputs:
+            num_drones: Number of drones in the batch.
+            quad_params: Dict of tensors.
+                - mass, c_Dx, c_Dy, c_Dz: Shape (num_drones, 1)
+                - alpha, beta, kappa: Shape (num_drones, 1)
+                - xhat0: Initial state estimate [psi, theta, phi, u, v, w, wx, wy, wz], Shape (num_drones, 9)
+                - P0: Initial state covariance, Shape (num_drones, 9, 9)
+                - Q: Process noise covariance, Shape (num_drones, 9, 9)
+                - R: Measurement noise covariance, Shape (num_drones, 9, 9)
+            dt: The time between predictions.
+            device: 'cpu' or 'cuda'.
+        """
+        self.num_drones = num_drones
+        self.device = device
+        self.dt = dt
+        self.n = 9  # State dimension
+        self.num_sigmas = 2 * self.n + 1
+        self.g = 9.81
+
+        # Physical parameters (B, 1)
+        self.mass = quad_params['mass'].to(device).double().view(num_drones, 1)
+        self.kx = quad_params['c_Dx'].to(device).double().view(num_drones, 1) / self.mass
+        self.ky = quad_params['c_Dy'].to(device).double().view(num_drones, 1) / self.mass
+        self.kz = quad_params['c_Dz'].to(device).double().view(num_drones, 1) / self.mass
+
+        # Filter state and unique covariances per drone
+        self.xhat = quad_params['xhat0'].to(device).double().view(num_drones, 9)
+        self.P = quad_params['P0'].to(device).double().view(num_drones, 9, 9)
+        self.Q = quad_params['Q'].to(device).double().view(num_drones, 9, 9)
+        self.R = quad_params['R'].to(device).double().view(num_drones, 9, 9)
+
+        # UKF Scaling Parameters (B, 1)
+        alpha = quad_params.get('alpha', torch.full((num_drones, 1), 0.1, device=device)).double()
+        beta = quad_params.get('beta', torch.full((num_drones, 1), 2.0, device=device)).double()
+        kappa = quad_params.get('kappa', torch.full((num_drones, 1), -1.0, device=device)).double()
+
+        # Compute batched weights
+        lambd = alpha**2 * (self.n + kappa) - self.n  # (B, 1)
+
+        # Mean weights (B, num_sigmas)
+        self.w_m = torch.full((num_drones, self.num_sigmas), 0.0, device=device, dtype=torch.double)
+        self.w_m[:, 0:1] = lambd / (self.n + lambd)
+        self.w_m[:, 1:] = 1.0 / (2.0 * (self.n + lambd))
+
+        # Covariance weights (B, num_sigmas)
+        self.w_c = self.w_m.clone()
+        self.w_c[:, 0:1] = self.w_m[:, 0:1] + (1.0 - alpha**2 + beta)
+
+        # Scaling factor for sigma point generation (B, 1)
+        self.gamma = torch.sqrt(self.n + lambd)
+
+    def step(self, ground_truth_state, controller_command, imu_measurement, mocap_measurement):
+        """
+        One-step propagate and update.
+        """
+        # 1. Prepare control vector uk: [T/m, p, q, r]
+        uk = torch.zeros((self.num_drones, 4), device=self.device, dtype=torch.double)
+        uk[:, 0] = (controller_command['cmd_thrust'].view(-1) / self.mass.view(-1))
+        uk[:, 1:4] = ground_truth_state['w'].view(self.num_drones, 3)
+
+        # 2. Prepare measurement vector yk: [psi, theta, phi, u, v, w, ax, ay, az]
+        yk = torch.zeros((self.num_drones, 9), device=self.device, dtype=torch.double)
+        q_mocap = mocap_measurement['q'].view(self.num_drones, 4)
+
+        # State order matches WindUKF.f(): [psi, theta, phi]
+        yk[:, 0:3] = self._quat_to_euler_zyx(q_mocap)
+        yk[:, 3:6] = self._rotate_to_body(mocap_measurement['v'].view(self.num_drones, 3), q_mocap)
+        yk[:, 6:9] = imu_measurement['accel'].view(self.num_drones, 3)
+
+        # 3. Filter steps
+        self.predict(uk)
+        self.update(yk, uk)
+
+        return {'filter_state': self.xhat, 'covariance': self.P}
+
+    def generate_sigma_points(self, x, P):
+        """Generates (B, 2n+1, n) sigma points using batched Cholesky."""
+        B = x.shape[0]
+        # Ensure positive definiteness for Cholesky
+        eps = 1e-9 * torch.eye(self.n, device=self.device, dtype=torch.double)
+        L = torch.linalg.cholesky(P + eps) # (B, n, n)
+
+        sigmas = torch.zeros((B, self.num_sigmas, self.n), device=self.device, dtype=torch.double)
+        sigmas[:, 0, :] = x
+
+        # Scaling matrix: gamma * L
+        scaled_L = self.gamma.unsqueeze(-1) * L # (B, n, n)
+
+        for i in range(self.n):
+            sigmas[:, i + 1, :] = x + scaled_L[:, :, i]
+            sigmas[:, i + 1 + self.n, :] = x - scaled_L[:, :, i]
+        return sigmas
+
+    def predict(self, uk):
+        sigmas = self.generate_sigma_points(self.xhat, self.P)
+
+        # Propagate sigmas through dynamics
+        sigmas_flat = sigmas.view(-1, self.n)
+        uk_expanded = uk.repeat_interleave(self.num_sigmas, dim=0)
+
+        sigmas_f = self.compute_dynamics(sigmas_flat, uk_expanded)
+        sigmas_f = sigmas_f.view(self.num_drones, self.num_sigmas, self.n)
+
+        # Predict Mean: x = sum(w_m * sigmas_f)
+        self.xhat = torch.einsum('bs,bsn->bn', self.w_m, sigmas_f)
+
+        # Predict Covariance: P = sum(w_c * (f - x)(f - x)^T) + Q
+        y = sigmas_f - self.xhat.unsqueeze(1)
+        self.P = torch.einsum('bs,bsn,bsm->bnm', self.w_c, y, y) + self.Q
+
+    def update(self, zk, uk):
+        sigmas = self.generate_sigma_points(self.xhat, self.P)
+
+        # Sigmas through measurement model
+        sigmas_flat = sigmas.view(-1, self.n)
+        uk_expanded = uk.repeat_interleave(self.num_sigmas, dim=0)
+
+        sigmas_h = self.compute_measurement(sigmas_flat, uk_expanded)
+        sigmas_h = sigmas_h.view(self.num_drones, self.num_sigmas, self.n)
+
+        # Measurement mean and covariances
+        z_mean = torch.einsum('bs,bsn->bn', self.w_m, sigmas_h)
+        dz = sigmas_h - z_mean.unsqueeze(1)
+        dx = sigmas - self.xhat.unsqueeze(1)
+
+        S = torch.einsum('bs,bsn,bsm->bnm', self.w_c, dz, dz) + self.R # (B, n, n)
+        Pxz = torch.einsum('bs,bsn,bsm->bnm', self.w_c, dx, dz)       # (B, n, n)
+
+        # Kalman Gain and Posteriori
+        K = torch.bmm(Pxz, torch.inverse(S))
+        self.xhat = self.xhat + torch.bmm(K, (zk - z_mean).unsqueeze(-1)).squeeze(-1)
+        self.P = self.P - torch.bmm(K, torch.bmm(S, K.transpose(1, 2)))
+
+    def compute_dynamics(self, xk, uk):
+        """Matches WindUKF.f() ZYX order logic."""
+        vax, vay, vaz = xk[:, 3]-xk[:, 6], xk[:, 4]-xk[:, 7], xk[:, 5]-xk[:, 8]
+        va = torch.sqrt(vax**2 + vay**2 + vaz**2 + 1e-6)
+
+        kx = self.kx.repeat_interleave(self.num_sigmas, 0).view(-1)
+        ky = self.ky.repeat_interleave(self.num_sigmas, 0).view(-1)
+        kz = self.kz.repeat_interleave(self.num_sigmas, 0).view(-1)
+
+        xdot = torch.zeros_like(xk)
+        # ZYX Order: psi, theta, phi
+        xdot[:, 0] = xk[:, 2]*uk[:, 2] + uk[:, 3]
+        xdot[:, 1] = uk[:, 2] - xk[:, 2]*uk[:, 3]
+        xdot[:, 2] = uk[:, 1] + xk[:, 2]*xk[:, 1]*uk[:, 2] + xk[:, 0]*uk[:, 3]
+
+        # Body Velocities u, v, w
+        xdot[:, 3] = -kx * vax * va + self.g * xk[:, 1] + xk[:, 4] * uk[:, 3] - xk[:, 5] * uk[:, 1]
+        xdot[:, 4] = -ky * vay * va - self.g * xk[:, 2] + xk[:, 5] * uk[:, 1] - xk[:, 3] * uk[:, 3]
+        xdot[:, 5] = uk[:, 0] - kz * vaz * va - self.g + xk[:, 3] * uk[:, 2] - xk[:, 4] * uk[:, 1]
+
+        return xk + xdot * self.dt
+
+    def compute_measurement(self, xk, uk):
+        """Matches WindUKF.h() logic."""
+        vax, vay, vaz = xk[:, 3]-xk[:, 6], xk[:, 4]-xk[:, 7], xk[:, 5]-xk[:, 8]
+        va = torch.sqrt(vax**2 + vay**2 + vaz**2 + 1e-6)
+
+        kx = self.kx.repeat_interleave(self.num_sigmas, 0).view(-1)
+        ky = self.ky.repeat_interleave(self.num_sigmas, 0).view(-1)
+        kz = self.kz.repeat_interleave(self.num_sigmas, 0).view(-1)
+
+        h = torch.zeros_like(xk)
+        h[:, 0:6] = xk[:, 0:6]
+        h[:, 6] = -kx * vax * va
+        h[:, 7] = -ky * vay * va
+        h[:, 8] = uk[:, 0] - kz * vaz * va
+        return h
+
+    def _quat_to_euler_zyx(self, q):
+        # q: [x, y, z, w], returns [psi (yaw), theta (pitch), phi (roll)]
+        x, y, z, w = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
+        psi = torch.atan2(2 * (w * z + x * y), 1 - 2 * (y**2 + z**2))
+        theta = torch.asin(torch.clamp(2 * (w * y - z * x), -1.0, 1.0))
+        phi = torch.atan2(2 * (w * x + y * z), 1 - 2 * (x**2 + y**2))
+        return torch.stack([psi, theta, phi], dim=1)
+
+    def _rotate_to_body(self, v_world, q):
+        # v_body = R(q).T * v_world. Uses conjugate of q: [x, y, z, w]
+        x, y, z, w = q[:, 0:1], q[:, 1:2], q[:, 2:3], q[:, 3:4]
+        q_inv_vec = -torch.cat([x, y, z], dim=1)
+        qv = torch.cross(q_inv_vec, v_world, dim=1)
+        return v_world + 2.0 * torch.cross(q_inv_vec, qv + w * v_world, dim=1)

@@ -237,3 +237,169 @@ class WindEKF:
         # return {'euler_est': self.xhat[0:3], 'v_est': self.xhat[3:6], 'wind_est': self.xhat[6:9],
         #          'covariance': self.P, 'innovation': self.innovation}
         return {'filter_state': self.xhat, 'covariance': self.P}
+
+
+import torch
+
+class BatchedWindEKF:
+    def __init__(self, num_drones, quad_params, dt=1/100, device='cpu'):
+        """
+        Inputs:
+            num_drones: Number of drones in the batch.
+            quad_params: Dict of tensors.
+                - mass, c_Dx, c_Dy, c_Dz: Shape (num_drones, 1)
+                - xhat0: Initial state estimate, Shape (num_drones, 9)
+                - P0: Initial state covariance, Shape (num_drones, 9, 9)
+                - Q: Process noise covariance, Shape (num_drones, 9, 9)
+                - R: Measurement noise covariance, Shape (num_drones, 9, 9)
+            dt: The time between predictions.
+            device: 'cpu' or 'cuda'.
+        """
+        self.num_drones = num_drones
+        self.device = device
+        self.dt = dt
+        self.g = 9.81
+
+        # Physical parameters: ensure they are (B, 1) for consistent broadcasting
+        self.mass = quad_params['mass'].to(device).double().view(num_drones, 1)
+        self.kx = (quad_params['c_Dx'].to(device).double().view(num_drones, 1) / self.mass)
+        self.ky = (quad_params['c_Dy'].to(device).double().view(num_drones, 1) / self.mass)
+        self.kz = (quad_params['c_Dz'].to(device).double().view(num_drones, 1) / self.mass)
+
+        # Filter state and unique covariances per drone
+        self.xhat = quad_params['xhat0'].to(device).double().view(num_drones, 9)
+        self.P = quad_params['P0'].to(device).double().view(num_drones, 9, 9)
+        self.Q = quad_params['Q'].to(device).double().view(num_drones, 9, 9)
+        self.R = quad_params['R'].to(device).double().view(num_drones, 9, 9)
+
+        self.innovation = torch.zeros((num_drones, 9), device=device, dtype=torch.double)
+
+    def step(self, ground_truth_state, controller_command, imu_measurement, mocap_measurement):
+        """
+        Batched step function to propagate and update the EKF.
+        """
+        # 1. Prepare control vector uk: [T/m, p, q, r]
+        uk = torch.zeros((self.num_drones, 4), device=self.device, dtype=torch.double)
+
+        # Robust thrust handling to fix broadcasting/expansion errors
+        thrust = controller_command['cmd_thrust'].view(-1)
+        mass = self.mass.view(-1)
+        uk[:, 0] = thrust / mass # (B,)
+
+        # Body rates: ensure shape (B, 3)
+        uk[:, 1:4] = ground_truth_state['w'].view(self.num_drones, 3)
+
+        # 2. Prepare measurement vector yk: [phi, theta, psi, u, v, w, ax, ay, az]
+        yk = torch.zeros((self.num_drones, 9), device=self.device, dtype=torch.double)
+
+        # Convert Quaternions [x, y, z, w] to Euler [yaw, pitch, roll] (matching zyx order)
+        q_mocap = mocap_measurement['q'].view(self.num_drones, 4)
+        yk[:, 0:3] = self._quat_to_euler_zyx(q_mocap)
+
+        # Rotate inertial velocity to body frame: v_body = R(q).T * v_world
+        v_world = mocap_measurement['v'].view(self.num_drones, 3)
+        yk[:, 3:6] = self._rotate_to_body(v_world, q_mocap)
+
+        # IMU specific acceleration
+        yk[:, 6:9] = imu_measurement['accel'].view(self.num_drones, 3)
+
+        # 3. Filter Propagation and Update
+        self.predict(uk)
+        self.update(yk, uk)
+
+        return {'filter_state': self.xhat, 'covariance': self.P}
+
+    def predict(self, uk):
+        Ad, _ = self.compute_jacobians(self.xhat, uk)
+        self.xhat = self.xhat + (self.compute_xdot(self.xhat, uk) * self.dt)
+        self.P = torch.bmm(torch.bmm(Ad, self.P), Ad.transpose(1, 2)) + self.Q
+
+    def update(self, yk, uk):
+        _, C = self.compute_jacobians(self.xhat, uk)
+        self.innovation = yk - self.measurement_model(self.xhat, uk)
+
+        # S = C*P*C^T + R
+        S = torch.bmm(torch.bmm(C, self.P), C.transpose(1, 2)) + self.R
+        # K = P*C^T * inv(S)
+        K = torch.bmm(torch.bmm(self.P, C.transpose(1, 2)), torch.inverse(S))
+
+        # x = x + K*innovation
+        self.xhat = self.xhat + torch.bmm(K, self.innovation.unsqueeze(-1)).squeeze(-1)
+        # P = (I - K*C)*P
+        eye = torch.eye(9, device=self.device, dtype=torch.double).repeat(self.num_drones, 1, 1)
+        self.P = torch.bmm(eye - torch.bmm(K, C), self.P)
+
+    def compute_xdot(self, x, u):
+        vax, vay, vaz = x[:, 3]-x[:, 6], x[:, 4]-x[:, 7], x[:, 5]-x[:, 8]
+        va = torch.sqrt(vax**2 + vay**2 + vaz**2 + 1e-6)
+        kx, ky, kz = self.kx.view(-1), self.ky.view(-1), self.kz.view(-1)
+
+        xdot = torch.zeros_like(x)
+        # Euler angle kinematics (Small angle approximation matching original code)
+        xdot[:, 0] = u[:, 1] + x[:, 0] * x[:, 1] * u[:, 2] + x[:, 2] * u[:, 3]
+        xdot[:, 1] = u[:, 2] - x[:, 0] * u[:, 3]
+        xdot[:, 2] = x[:, 0] * u[:, 2] + u[:, 3]
+
+        # Body frame accelerations
+        xdot[:, 3] = -kx * vax * va + self.g * x[:, 1] + x[:, 4] * u[:, 3] - x[:, 5] * u[:, 1]
+        xdot[:, 4] = -ky * vay * va - self.g * x[:, 0] + x[:, 5] * u[:, 1] - x[:, 3] * u[:, 3]
+        xdot[:, 5] = u[:, 0] - kz * vaz * va - self.g + x[:, 3] * u[:, 2] - x[:, 4] * u[:, 1]
+        return xdot
+
+    def measurement_model(self, x, u):
+        h = torch.zeros_like(x)
+        vax, vay, vaz = x[:, 3]-x[:, 6], x[:, 4]-x[:, 7], x[:, 5]-x[:, 8]
+        va = torch.sqrt(vax**2 + vay**2 + vaz**2 + 1e-6)
+        kx, ky, kz = self.kx.view(-1), self.ky.view(-1), self.kz.view(-1)
+
+        h[:, 0:6] = x[:, 0:6]
+        h[:, 6] = -kx * vax * va
+        h[:, 7] = -ky * vay * va
+        h[:, 8] = u[:, 0] - kz * vaz * va
+        return h
+
+    def compute_jacobians(self, x, u):
+        B = self.num_drones
+        vax, vay, vaz = x[:, 3]-x[:, 6], x[:, 4]-x[:, 7], x[:, 5]-x[:, 8]
+        va = torch.sqrt(vax**2 + vay**2 + vaz**2 + 1e-6)
+        dvadu, dvadv, dvadw = vax/va, vay/va, vaz/va
+        kx, ky, kz = self.kx.view(-1), self.ky.view(-1), self.kz.view(-1)
+
+        A = torch.zeros((B, 9, 9), device=self.device, dtype=torch.double)
+        A[:, 0, 0], A[:, 0, 1] = x[:, 1] * u[:, 2], x[:, 0] * u[:, 2] + u[:, 3]
+        A[:, 1, 0], A[:, 2, 0] = -u[:, 3], u[:, 2]
+
+        A[:, 3, 1] = self.g
+        A[:, 3, 3] = -kx * (dvadu * vax + va)
+        A[:, 3, 4] = u[:, 3] - kx * dvadv * vax
+        A[:, 3, 5] = -u[:, 1] - kx * dvadw * vax
+        A[:, 3, 6], A[:, 3, 7], A[:, 3, 8] = kx * (dvadu * vax + va), kx * dvadv * vax, kx * dvadw * vax
+
+        A[:, 4, 0] = -self.g
+        A[:, 4, 3], A[:, 4, 4], A[:, 4, 5] = -ky * dvadu * vay - u[:, 3], -ky * (dvadv * vay + va), u[:, 1] - ky * dvadw * vay
+        A[:, 4, 6], A[:, 4, 7], A[:, 4, 8] = ky * dvadu * vay, ky * (dvadv * vay + va), ky * dvadw * vay
+
+        A[:, 5, 3], A[:, 5, 4], A[:, 5, 5] = u[:, 2] - kz * dvadu * vaz, -u[:, 1] - kz * dvadv * vaz, -kz * (dvadw * vaz + va)
+        A[:, 5, 6], A[:, 5, 7], A[:, 5, 8] = kz * dvadu * vaz, kz * dvadv * vaz, kz * (dvadw * vaz + va)
+
+        Ad = torch.eye(9, device=self.device, dtype=torch.double).repeat(B, 1, 1) + A * self.dt
+        C = torch.zeros((B, 9, 9), device=self.device, dtype=torch.double)
+        C[:, 0:6, 0:6] = torch.eye(6, device=self.device, dtype=torch.double)
+        C[:, 6:9, 3:9] = A[:, 3:6, 3:9] / self.dt
+        return Ad, C
+
+    def _quat_to_euler_zyx(self, q):
+        # q: (B, 4) in [x, y, z, w]
+        x, y, z, w = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
+        # Yaw (z), Pitch (y), Roll (x)
+        yaw = torch.atan2(2 * (w * z + x * y), 1 - 2 * (y**2 + z**2))
+        pitch = torch.asin(torch.clamp(2 * (w * y - z * x), -1.0, 1.0))
+        roll = torch.atan2(2 * (w * x + y * z), 1 - 2 * (x**2 + y**2))
+        return torch.stack([yaw, pitch, roll], dim=1)
+
+    def _rotate_to_body(self, v_world, q):
+        # Rotates v_world to body frame using conjugate of q: [x, y, z, w]
+        x, y, z, w = q[:, 0:1], q[:, 1:2], q[:, 2:3], q[:, 3:4]
+        q_inv_vec = -torch.cat([x, y, z], dim=1)
+        qv = torch.cross(q_inv_vec, v_world, dim=1)
+        return v_world + 2.0 * torch.cross(q_inv_vec, qv + w * v_world, dim=1)
