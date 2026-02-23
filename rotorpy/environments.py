@@ -407,15 +407,17 @@ class EnvironmentSwarm():
 
         return
 
-    # def set_init(self, initial_states):
-    #     if len(self.vehicles) != len(initial_states):
-    #         raise ValueError(
-    #             f"EnvironmentSwarm::set_init(): inconsistent initial_states sizes. "
-    #             f"Expected {len(self.vehicles)}. Got {len(initial_states)}"
-    #         )
-    #     for idx in range(len(initial_states)):
-    #         self.vehicles[idx].initial_state = initial_states[idx]
-    #     self.initial_states = initial_states
+
+    def set_init(self, initial_states):
+        if len(self.vehicles) != len(initial_states):
+            raise ValueError(
+                f"EnvironmentSwarm::set_init(): inconsistent initial_states sizes. "
+                f"Expected {len(self.vehicles)}. Got {len(initial_states)}"
+            )
+        for idx in range(len(initial_states)):
+            self.vehicles[idx].initial_state = initial_states[idx]
+        self.initial_states = initial_states
+
 
     def run(self,
             t_final=10,

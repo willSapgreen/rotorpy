@@ -127,6 +127,8 @@ def _sample_gmm_targets_xy_in_bounds(
     return out[:num_samples, :]
 
 
+########## 2D visualization helper ##########
+
 def _write_basic_usage_swarm_2d_video(results, vis_output_name,
                                       x_min, x_max, y_min, y_max,
                                       num_vehicles, samples_xy, rng):
@@ -246,6 +248,147 @@ def _write_basic_usage_swarm_2d_video(results, vis_output_name,
     print(f"[basic_usage_swarm] Video written to: {avi_path}")
 
 
+########## 3D visualization helper ##########
+
+def _write_basic_usage_swarm_3d_video(
+    results,
+    vis_output_name_3d,
+    x_min, x_max, y_min, y_max, z_min, z_max,
+    num_vehicles,
+    samples_xy,
+    rng,
+    elev: float = 20.0,
+    azim: float = -60.0,
+    fps: int = 60,
+):
+    """
+    Generate a true 3D AVI video visualizing:
+      - target samples as points on z=0 plane
+      - vehicle trajectories frame-by-frame in 3D
+
+    Uses Matplotlib mplot3d and writes frames via OpenCV VideoWriter.
+
+    Args:
+      elev, azim: Matplotlib 3D camera view angles (degrees)
+      fps: output video FPS
+    """
+    import os
+    import cv2
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 (needed for 3D)
+
+    # ===================== Output path =====================
+    out_dir = os.path.dirname(os.path.abspath(__file__))
+    avi_path = os.path.join(out_dir, vis_output_name_3d)
+
+    # ===================== Visualization bounds =====================
+    vis_pad = 0.5
+    vis_x_min, vis_x_max = x_min - vis_pad, x_max + vis_pad
+    vis_y_min, vis_y_max = y_min - vis_pad, y_max + vis_pad
+    vis_z_min, vis_z_max = z_min - vis_pad, z_max + vis_pad
+
+    # If your z range is tight or fixed at 0, keep it viewable:
+    if abs(vis_z_max - vis_z_min) < 1e-6:
+        vis_z_min -= 1.0
+        vis_z_max += 1.0
+
+    # ===================== Extract trajectories =====================
+    traj_xyz = []
+    traj_len = []
+    for i in range(num_vehicles):
+        xyz = np.asarray(results["state"][i]["x"], dtype=float)[:, :3]  # (Ti,3)
+        traj_xyz.append(xyz)
+        traj_len.append(xyz.shape[0])
+
+    num_frames = int(max(traj_len))
+    print(f"[basic_usage_swarm] 3D traj lengths: min={min(traj_len)}, max={max(traj_len)}")
+
+    # Pre-allocate arrays with NaNs (NaNs are effectively ignored)
+    xs = np.full((num_vehicles,), np.nan, dtype=float)
+    ys = np.full((num_vehicles,), np.nan, dtype=float)
+    zs = np.full((num_vehicles,), np.nan, dtype=float)
+
+    # ===================== Matplotlib setup =====================
+    fig = plt.figure(figsize=(7, 6))
+    ax = fig.add_subplot(111, projection="3d")
+
+    ax.set_xlim(vis_x_min, vis_x_max)
+    ax.set_ylim(vis_y_min, vis_y_max)
+    ax.set_zlim(vis_z_min, vis_z_max)
+
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+    ax.set_zlabel("z")
+
+    # Camera
+    ax.view_init(elev=elev, azim=azim)
+
+    # Make axes aspect closer to equal (best-effort; Matplotlib varies by version)
+    try:
+        ax.set_box_aspect((vis_x_max - vis_x_min, vis_y_max - vis_y_min, vis_z_max - vis_z_min))
+    except Exception:
+        pass
+
+    # Target samples at z=0 (triangles)
+    if samples_xy is not None and len(samples_xy) > 0:
+        ax.scatter(
+            samples_xy[:, 0],
+            samples_xy[:, 1],
+            np.zeros((samples_xy.shape[0],), dtype=float),
+            s=60,
+            c="k",
+            alpha=0.45,
+            marker="^",
+            linewidths=0,
+        )
+
+    # Initial vehicle positions
+    X0 = np.stack(
+        [np.asarray(results["state"][i]["x"], dtype=float)[0, :3] for i in range(num_vehicles)],
+        axis=0,
+    )
+
+    colors = rng.random((num_vehicles, 3))
+    scat = ax.scatter(X0[:, 0], X0[:, 1], X0[:, 2], s=20, c=colors, depthshade=True)
+
+    fig.canvas.draw()
+
+    # ===================== OpenCV writer =====================
+    width, height = fig.canvas.get_width_height()
+    fourcc = cv2.VideoWriter_fourcc(*"XVID")
+    video = cv2.VideoWriter(avi_path, fourcc, fps, (width, height))
+
+    # ===================== Frame loop =====================
+    for k in range(num_frames):
+        for i in range(num_vehicles):
+            if k < traj_len[i]:
+                xs[i] = traj_xyz[i][k, 0]
+                ys[i] = traj_xyz[i][k, 1]
+                zs[i] = traj_xyz[i][k, 2]
+            else:
+                xs[i] = np.nan
+                ys[i] = np.nan
+                zs[i] = np.nan
+
+        # Update 3D scatter (mplot3d-specific)
+        scat._offsets3d = (xs, ys, zs)
+
+        ax.set_title(f"3D frame {k}/{num_frames-1} | elev={elev:.1f}, azim={azim:.1f}")
+
+        fig.canvas.draw()
+
+        buf = np.frombuffer(fig.canvas.tostring_argb(), dtype=np.uint8)
+        buf = buf.reshape(height, width, 4)
+        frame = buf[:, :, [3, 2, 1]]  # ARGB → BGR
+
+        video.write(frame)
+
+    video.release()
+    plt.close(fig)
+
+    print(f"[basic_usage_swarm] 3D Video written to: {avi_path}")
+
 def _save_basic_usage_swarm_csv(results, csv_path):
     """
     Save per-vehicle trajectories to CSV for your results format:
@@ -312,6 +455,15 @@ def parse_args():
 
     parser.add_argument("--output-name", type=str, default="basic_usage_swarm",
                         help="Base output name (used for .csv and .avi)")
+
+    parser.add_argument("--elev", type=float, default=20.0,
+                        help="3D camera elevation angle (degrees)")
+
+    parser.add_argument("--azim", type=float, default=-60.0,
+                        help="3D camera azimuth angle (degrees)")
+
+    parser.add_argument("--no-3d-video", action="store_true",
+                        help="Disable 3D AVI output")
 
     return parser.parse_args()
 
@@ -501,8 +653,9 @@ def run_world(args):
     t1 = time.perf_counter()
     print(f"Finish simulation in {t1 - t0:.3f} seconds")
 
-    # ===================== Save & postprocess =====================
-
+    # ------------------------------------------------------------
+    # Save results and generate visualization
+    # ------------------------------------------------------------
     print("Start visualization output")
     t0 = time.perf_counter()
 
@@ -512,10 +665,25 @@ def run_world(args):
             if isinstance(v, list):
                 results["state"][i][k] = np.asarray(v)
 
+    # 2D video
     vis_output_name = output_name + ".avi"
-    _write_basic_usage_swarm_2d_video(results, vis_output_name,
-                                      x_min, x_max, y_min, y_max,
-                                      num_vehicles, samples_xy, rng)
+    _write_basic_usage_swarm_2d_video(
+        results, vis_output_name,
+        x_min, x_max, y_min, y_max,
+        num_vehicles, samples_xy, rng
+    )
+
+    # 3D video
+    if not args.no_3d_video:
+        vis_output_name_3d = output_name + "_3d.avi"
+        _write_basic_usage_swarm_3d_video(
+            results, vis_output_name_3d,
+            x_min, x_max, y_min, y_max, z_min, z_max,
+            num_vehicles, samples_xy, rng,
+            elev=args.elev, azim=args.azim,
+            fps=60,
+        )
+
     t1 = time.perf_counter()
     print(f"Finish visualization output in {t1 - t0:.3f} seconds")
 
@@ -535,6 +703,7 @@ def run_world(args):
     print(f"Finish CSV output in {t1 - t0:.3f} seconds")
 
 
+########## Main ##########
 if __name__ == "__main__":
     import time
 

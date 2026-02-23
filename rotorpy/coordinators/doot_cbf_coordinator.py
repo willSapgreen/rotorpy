@@ -428,7 +428,7 @@ class DootCbfCoordinator:
         if n_neigh < 2:
             raise ValueError("doot_config.num_neighbors must be >= 2 for including self then dropping.")
 
-	# TODO: If the agents’ distribution is non-planar, the difference in the z-coordinate must be taken into account.
+        # TODO: If the agents’ distribution is non-planar, the difference in the z-coordinate must be taken into account.
         # K including self
         K_including_self = min(n_neigh, self.num_vehicles)
         k = K_including_self - 1  # neighbors excluding self
