@@ -229,10 +229,13 @@ def unit_test_01():
     for step in range(intervals):
         cur_time += dt
         coordinator.step(cur_time, cur_x)
-        transport_vel_fns = coordinator.get_transport_vel_fns()
+        # transport_vel_fns = coordinator.get_transport_vel_fns()
+        v_batch = coordinator.get_vel_cmds()
 
         for i in range(num_vehicles):
-            v = np.asarray(transport_vel_fns[i](cur_time), dtype=float).reshape(3,)
+            # v = np.asarray(transport_vel_fns[i](cur_time), dtype=float).reshape(3,)
+            # v = np.asarray(v_batch[i](cur_time), dtype=float).reshape(3,)
+            v = np.asarray(v_batch[i], dtype=float).reshape(3,)
             cur_x[i]["x"] += v * dt
 
         xy = np.array([cur_x[i]["x"][:2] for i in range(num_vehicles)], dtype=float)
@@ -447,7 +450,8 @@ def unit_test_02():
         # ---- DOOT (nominal) ----
         cur_time += dt
         coordinator.step(cur_time, cur_nom)
-        v_nom = np.array([coordinator.get_transport_vel_fns()[i](cur_time) for i in range(num_vehicles)], dtype=float)
+        # v_nom = np.array([coordinator.get_transport_vel_fns()[i](cur_time) for i in range(num_vehicles)], dtype=float)
+        v_nom = np.asarray(coordinator.get_vel_cmds(), dtype=float).copy()
         v_nom[:, 2] = 0.0
 
         # ---- CBF projection using previous CBF positions ----

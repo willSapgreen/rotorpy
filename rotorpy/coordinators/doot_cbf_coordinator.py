@@ -85,10 +85,10 @@ class CbfConfig:
         object.__setattr__(self, "kde_radius_bar", Rh_bar)
         object.__setattr__(self, "interaction_radius", Rh_bar)
 
+
 class DootCbfCoordinator:
     """
-    Coordinator that stores per-vehicle commanded velocities and exposes
-    per-vehicle callables transport_vel_fn(cur_time) -> radius^3.
+    Coordinator that stores per-vehicle commanded velocities.
 
     This class hosts DOOT (and CBF later) in `step(...)`.
 
@@ -111,94 +111,84 @@ class DootCbfCoordinator:
         apply_cbf: bool = False,
         cbf_config: Optional[CbfConfig] = None,
     ):
-        # Membership / core
-        self.vehicles = vehicles
-        self.num_vehicles = len(self.vehicles)
-        if self.num_vehicles < 1:
+        # Initialize vehicles setting
+        self._vehicles = vehicles
+        self._num_vehicles = len(self._vehicles)
+        if self._num_vehicles < 1:
             raise ValueError("vehicles must be a non-empty list.")
-        self.velocity_max = velocity_max  # scalar cap (m/s) for all vehicles in this coordinator
+        self._velocity_max = velocity_max  # scalar cap (m/s) for all vehicles in this coordinator
 
-        # Target samples (num_targeted_pos,3)
-        self.targeted_positions = np.asarray(targeted_positions, dtype=float)
-        if self.targeted_positions.ndim != 2 or self.targeted_positions.shape[1] != 3:
+        # Initialize target samples, (num_targeted_pos,3), setting
+        self._targeted_positions = np.asarray(targeted_positions, dtype=float)
+        if self._targeted_positions.ndim != 2 or self._targeted_positions.shape[1] != 3:
             raise ValueError(
-                f"targeted_positions must have shape (num_targeted_pos,3), got {self.targeted_positions.shape}"
+                f"targeted_positions must have shape (num_targeted_pos,3), got {self._targeted_positions.shape}"
             )
 
-        # DOOT config
-        self.doot_config = doot_config
-        if self.doot_config.num_neighbors < 1:
+        # Set up DOOT config
+        self._doot_config = doot_config
+        if self._doot_config.num_neighbors < 1:
             raise ValueError("doot_config.num_neighbors must be >= 1 (excluding self).")
-        if self.doot_config.max_iter_primaldual < 1:
+        if self._doot_config.max_iter_primaldual < 1:
             raise ValueError("doot_config.max_iter_primaldual must be >= 1.")
-        if self.doot_config.use_random_sampling:
-            if self.doot_config.num_trial_move_samples < 1:
+        if self._doot_config.use_random_sampling:
+            if self._doot_config.num_trial_move_samples < 1:
                 raise ValueError("doot_config.num_trial_move_samples must be >= 1.")
-            if self.doot_config.min_displacement_norm < 0.0:
+            if self._doot_config.min_displacement_norm < 0.0:
                 raise ValueError("doot_config.min_displacement_norm must be >= 0.")
 
-        # Trial-move distribution defaults (3D)
-        if self.doot_config.mean_trial_move is None:
+        # Set up trial-move distribution defaults (3D)
+        if self._doot_config.mean_trial_move is None:
             mean_trial_move = [0.0, 0.0, 0.0]
         else:
-            mean_trial_move = self.doot_config.mean_trial_move
+            mean_trial_move = self._doot_config.mean_trial_move
 
-        if self.doot_config.var_trial_move is None:
+        if self._doot_config.var_trial_move is None:
             var_trial_move = [0.05, 0.05, 0.05]
         else:
-            var_trial_move = self.doot_config.var_trial_move
+            var_trial_move = self._doot_config.var_trial_move
 
-        self.mean_trial_move = np.asarray(mean_trial_move, dtype=float).reshape(3,)
-        self.var_trial_move = np.asarray(var_trial_move, dtype=float).reshape(3,)
-        if np.any(self.var_trial_move < 0.0):
+        self._mean_trial_move = np.asarray(mean_trial_move, dtype=float).reshape(3,)
+        self._var_trial_move = np.asarray(var_trial_move, dtype=float).reshape(3,)
+        if np.any(self._var_trial_move < 0.0):
             raise ValueError("var_trial_move must be nonnegative per axis.")
 
-        # DOOT runtime state
-        self.phi = np.zeros((self.num_vehicles,), dtype=float)  # dual potential at agent locations
-        self.last_time: Optional[float] = None
+        # Set up DOOT runtime state
+        self._phi = np.zeros((self._num_vehicles,), dtype=float)  # dual potential at agent locations
+        self._last_time: Optional[float] = None
 
-        # RNG
+        # Set up random number generator (RNG)
         # - use_random_sampling=True  -> non-deterministic seed (system entropy)
         # - use_random_sampling=False -> deterministic seed (_FIXED_SEED)
-        seed = None if self.doot_config.use_random_sampling else self._FIXED_SEED
-        self.rng: np.random.Generator = np.random.default_rng(seed)
+        seed = None if self._doot_config.use_random_sampling else self._FIXED_SEED
+        self._rng: np.random.Generator = np.random.default_rng(seed)
 
-
-        # Command storage
-        self._transport_vel = np.zeros((self.num_vehicles, 3), dtype=float)
-        self._transport_vel_fns = [self._make_transport_vel_fn(i) for i in range(self.num_vehicles)]
+        # Set up command storage (latest velocity commands, Nx3)
+        self._vel_cmds: np.ndarray = np.zeros((self._num_vehicles, 3), dtype=float)
 
         # CBF config
-        self.apply_cbf = bool(apply_cbf)
-        self.cbf_config = cbf_config
-        if self.apply_cbf and self.cbf_config is None:
+        self._apply_cbf = bool(apply_cbf)
+        self._cbf_config = cbf_config
+        if self._apply_cbf and self._cbf_config is None:
             raise ValueError("apply_cbf=True requires a valid CbfConfig.")
 
         # CBF runtime state (previous positions only)
         self._positions_prev_cbf: Optional[np.ndarray] = None
 
-    def _make_transport_vel_fn(self, vehicle_idx: int) -> Callable[[float], np.ndarray]:
 
-        # transport_vel_fn(cur_time) returns the latest _transport_vel[vehicle_idx]
-        def transport_vel_fn(cur_time: float) -> np.ndarray:
-            return self._transport_vel[vehicle_idx]
-        return transport_vel_fn
-
-    def get_transport_vel_fns(self) -> List[Callable[[float], np.ndarray]]:
-        return self._transport_vel_fns
-
-    def set_transport_vel_batch(self, vel_batch: np.ndarray) -> None:
+    def _set_vel_cmds(self, vel_batch: np.ndarray) -> None:
         vel_batch = np.asarray(vel_batch, dtype=float)
-        if vel_batch.shape != (self.num_vehicles, 3):
-            raise ValueError(f"vel_batch must have shape {(self.num_vehicles, 3)}, got {vel_batch.shape}")
 
-        if self.velocity_max is not None:
+        # Enforce global velocity cap
+        if self._velocity_max is not None:
             speeds = np.linalg.norm(vel_batch, axis=1)
-            mask = speeds > self.velocity_max
+            mask = speeds > self._velocity_max
             if np.any(mask):
-                vel_batch[mask] *= (self.velocity_max / speeds[mask])[:, None]
+                vel_batch = vel_batch.copy()
+                vel_batch[mask] *= (self._velocity_max / speeds[mask])[:, None]
 
-        self._transport_vel[:, :] = vel_batch
+        self._vel_cmds = vel_batch
+
 
     def _compute_kde_density_and_gradient(
         self,
@@ -218,16 +208,16 @@ class DootCbfCoordinator:
         If planar=False:
         - compute KDE in 3D and return full (3,) gradient
         """
-        if self.cbf_config is None:
+        if self._cbf_config is None:
             raise RuntimeError("_compute_kde_density_and_gradient called but cbf_config is None.")
 
         positions_prev = np.asarray(positions_prev, dtype=float)
-        if positions_prev.shape != (self.num_vehicles, 3):
-            raise ValueError(f"positions_prev must have shape {(self.num_vehicles, 3)}, got {positions_prev.shape}")
-        if not (0 <= vehicle_idx < self.num_vehicles):
+        if positions_prev.shape != (self._num_vehicles, 3):
+            raise ValueError(f"positions_prev must have shape {(self._num_vehicles, 3)}, got {positions_prev.shape}")
+        if not (0 <= vehicle_idx < self._num_vehicles):
             raise IndexError(f"vehicle_idx out of range: {vehicle_idx}")
 
-        cfg = self.cbf_config
+        cfg = self._cbf_config
         bw = float(cfg.kde_bandwidth)
         radius = float(cfg.interaction_radius)
 
@@ -256,9 +246,9 @@ class DootCbfCoordinator:
                 dists_k = dists[neigh_mask]                          # (K,)
                 w = np.exp(-(dists_k ** 2) / (2.0 * (bw ** 2)))      # (K,)
 
-                rho_m = float(np.sum(w) / (float(self.num_vehicles) * kde_norm_const_2d_truncated))
+                rho_m = float(np.sum(w) / (float(self._num_vehicles) * kde_norm_const_2d_truncated))
 
-                grad_2d = -(1.0 / (float(self.num_vehicles) * kde_norm_const_2d_truncated * (bw ** 2))) * np.sum(
+                grad_2d = -(1.0 / (float(self._num_vehicles) * kde_norm_const_2d_truncated * (bw ** 2))) * np.sum(
                     diffs_k * w[:, None], axis=0
                 )
 
@@ -271,7 +261,7 @@ class DootCbfCoordinator:
             # --- 3D KDE ---
             diffs = positions_prev - positions_prev[vehicle_idx, :]                 # (N,3)
             dists = np.linalg.norm(diffs, axis=1)         # (N,)
-            neigh_mask = (dists <= radius) & (dists > 0.0)
+            neigh_mask = (dists <= radius) & (dists >= 0.0)
 
             # 3D Gaussian normalization
             kde_norm_const_3d_truncated = (2.0 * np.pi) ** (1.5) * (bw ** 3)
@@ -284,9 +274,9 @@ class DootCbfCoordinator:
                 dists_k = dists[neigh_mask]                          # (K,)
                 w = np.exp(-(dists_k ** 2) / (2.0 * (bw ** 2)))      # (K,)
 
-                rho_m = float(np.sum(w) / (float(self.num_vehicles) * kde_norm_const_3d_truncated))
+                rho_m = float(np.sum(w) / (float(self._num_vehicles) * kde_norm_const_3d_truncated))
 
-                grad_3d = -(1.0 / (float(self.num_vehicles) * kde_norm_const_3d_truncated * (bw ** 2))) * np.sum(
+                grad_3d = -(1.0 / (float(self._num_vehicles) * kde_norm_const_3d_truncated * (bw ** 2))) * np.sum(
                     diffs_k * w[:, None], axis=0
                 )
 
@@ -315,10 +305,10 @@ class DootCbfCoordinator:
         After projection, the velocity is saturated to unit norm to enforce
         a maximum speed constraint.
         """
-        if self.cbf_config is None:
+        if self._cbf_config is None:
             raise RuntimeError("_apply_cbf_projection called but cbf_config is None.")
 
-        cfg = self.cbf_config
+        cfg = self._cbf_config
 
         vel = np.asarray(vel_nominal, dtype=float).reshape(3,).copy()
         grad_rho = np.asarray(density_grad, dtype=float).reshape(3,)
@@ -351,11 +341,11 @@ class DootCbfCoordinator:
 
     def step(self, cur_time: float, states: List[Dict[str, Any]]) -> None:
         """
-        DOOT step (CBF optional via self.apply_cbf).
+        DOOT step (CBF optional via self._apply_cbf).
 
         Inputs:
         cur_time: global simulation time (seconds)
-        states: list of length self.num_vehicles, only for member vehicles; each must include 'x' (3,)
+        states: list of length self._num_vehicles, only for member vehicles; each must include 'x' (3,)
 
         Behavior:
         - compute dt = cur_time - last_time
@@ -364,26 +354,26 @@ class DootCbfCoordinator:
         - choose trial move per agent: argmin(||d|| + evaluate_phi_with_fallback(x+d)) with ||d|| >= min_displacement_norm
         - convert displacement to velocity v = d/dt
         - optionally apply CBF filter to v_nom
-        - store v in _transport_vel
+        - store v in _vel_cmds
         """
-        if len(states) != self.num_vehicles:
-            raise ValueError(f"states must have length num_vehicles={self.num_vehicles}, got {len(states)}")
+        if len(states) != self._num_vehicles:
+            raise ValueError(f"states must have length num_vehicles={self._num_vehicles}, got {len(states)}")
 
         # Initialize time on first call
-        if self.last_time is None:
-            self.last_time = float(cur_time)
-            self.set_transport_vel_batch(np.zeros((self.num_vehicles, 3), dtype=float))
+        if self._last_time is None:
+            self._last_time = float(cur_time)
+            self._set_vel_cmds(np.zeros((self._num_vehicles, 3)))
             return
 
-        dt = float(cur_time) - float(self.last_time)
-        self.last_time = float(cur_time)
+        dt = float(cur_time) - float(self._last_time)
+        self._last_time = float(cur_time)
 
         if (not np.isfinite(dt)) or dt <= 0.0:
-            self.set_transport_vel_batch(np.zeros((self.num_vehicles, 3), dtype=float))
+            self._set_vel_cmds(np.zeros((self._num_vehicles, 3)))
             return
 
         # Extract vehicles' positions (num_vehicles,3)
-        positions = np.zeros((self.num_vehicles, 3), dtype=float)
+        positions = np.zeros((self._num_vehicles, 3), dtype=float)
         for i, s in enumerate(states):
             if "x" not in s:
                 raise KeyError("Each state must contain key 'x' with shape (3,).")
@@ -399,38 +389,38 @@ class DootCbfCoordinator:
         # TODO (Option B): use SVD/rank-based plane detection for rotated planes.
         # ------------------------------------------------------------
         std_xyz = np.std(positions, axis=0)  # (3,)
-        planar = bool(np.any(std_xyz <= float(self.doot_config.planar_std_threshold)))
+        planar = bool(np.any(std_xyz <= float(self._doot_config.planar_std_threshold)))
 
         if planar:
             axes_2d = tuple(np.argsort(std_xyz)[-2:].tolist())  # e.g. (0,2) for XZ plane
             dropped_axis = int(np.argsort(std_xyz)[0])
             positions_2d = positions[:, axes_2d]                           # (num_vehicles,2)
-            targeted_positions = self.targeted_positions[:, axes_2d]     # (num_targeted_pos,2)
+            targeted_positions = self._targeted_positions[:, axes_2d]     # (num_targeted_pos,2)
         else:
             axes_2d = None
             dropped_axis = None
             positions_2d = positions                                       # (num_vehicles,3)
-            targeted_positions = self.targeted_positions                 # (num_targeted_pos,3)
+            targeted_positions = self._targeted_positions                 # (num_targeted_pos,3)
 
         # ------------------------------------------------------------
         # 1) count: assign each target sample to nearest agent
         # ------------------------------------------------------------
-        num_targeted_pos = int(self.targeted_positions.shape[0])
+        num_targeted_pos = int(self._targeted_positions.shape[0])
         diff_ta = targeted_positions[:, None, :] - positions_2d[None, :, :]        # (num_targeted_pos,num_vehicles,dim)
         d2_ta = np.sum(diff_ta * diff_ta, axis=2)        # (num_targeted_pos,num_vehicles)
         nearest_agent = np.argmin(d2_ta, axis=1)         # (num_targeted_pos,) nearest_agent[i] = j means i-th sample is assigned to j-th agent
-        count = np.bincount(nearest_agent, minlength=self.num_vehicles).astype(float) / float(num_targeted_pos)
+        count = np.bincount(nearest_agent, minlength=self._num_vehicles).astype(float) / float(num_targeted_pos)
 
         # ------------------------------------------------------------
         # 2) Neighbor graph + Laplacian
         # ------------------------------------------------------------
-        n_neigh = int(self.doot_config.num_neighbors)
+        n_neigh = int(self._doot_config.num_neighbors)
         if n_neigh < 2:
             raise ValueError("doot_config.num_neighbors must be >= 2 for including self then dropping.")
 
         # TODO: If the agents’ distribution is non-planar, the difference in the z-coordinate must be taken into account.
         # K including self
-        K_including_self = min(n_neigh, self.num_vehicles)
+        K_including_self = min(n_neigh, self._num_vehicles)
         k = K_including_self - 1  # neighbors excluding self
 
         # Pairwise squared distances INCLUDING self
@@ -441,12 +431,12 @@ class DootCbfCoordinator:
         np.fill_diagonal(d2_aa, -np.inf)
 
         # Unordered K-candidate set (includes self); then we sort within the set by distance
-        kth = min(K_including_self - 1, self.num_vehicles - 1)
+        kth = min(K_including_self - 1, self._num_vehicles - 1)
         nn_full = np.argpartition(d2_aa, kth=kth, axis=1)[:, :K_including_self]  # (N,K_including_self)
 
         # Drop self and keep the closest k non-self neighbors
         nn_idx_list = []
-        for i in range(self.num_vehicles):
+        for i in range(self._num_vehicles):
             row = nn_full[i]
             row = row[np.argsort(d2_aa[i, row])]       # sort candidates by distance
             row_wo_self = row[row != i]               # drop self
@@ -455,8 +445,8 @@ class DootCbfCoordinator:
         nn_idx = np.stack(nn_idx_list, axis=0)        # (N,k)
 
         # Directed adjacency A (N x N)
-        adjacency_directed = np.zeros((self.num_vehicles, self.num_vehicles), dtype=float)
-        rows = np.repeat(np.arange(self.num_vehicles), k)
+        adjacency_directed = np.zeros((self._num_vehicles, self._num_vehicles), dtype=float)
+        rows = np.repeat(np.arange(self._num_vehicles), k)
         cols = nn_idx.reshape(-1)
         adjacency_directed[rows, cols] = 1.0
 
@@ -474,19 +464,19 @@ class DootCbfCoordinator:
         # ------------------------------------------------------------
         # 3) Primal–dual inner iterations updating phi
         # ------------------------------------------------------------
-        normalization = 1.0 / float(self.num_vehicles)
+        normalization = 1.0 / float(self._num_vehicles)
         gain = 1.0 / float(n_neigh + 1)
 
-        phi = self.phi
-        for _ in range(int(self.doot_config.max_iter_primaldual)):
-            phi = phi - gain * (laplacian @ phi) + normalization * np.ones((self.num_vehicles,), dtype=float) - count
-        self.phi = phi
+        phi = self._phi
+        for _ in range(int(self._doot_config.max_iter_primaldual)):
+            phi = phi - gain * (laplacian @ phi) + normalization * np.ones((self._num_vehicles,), dtype=float) - count
+        self._phi = phi
 
         # ------------------------------------------------------------
         # 4) Scattered interpolant evaluate_phi_with_fallback in dim=2 (planar) or dim=3 (full)
         # ------------------------------------------------------------
-        phi_lin = LinearNDInterpolator(positions_2d, self.phi, fill_value=np.nan)
-        phi_nn = NearestNDInterpolator(positions_2d, self.phi)
+        phi_lin = LinearNDInterpolator(positions_2d, self._phi, fill_value=np.nan)
+        phi_nn = NearestNDInterpolator(positions_2d, self._phi)
 
         def evaluate_phi_with_fallback(pos: np.ndarray) -> np.ndarray:
             v = phi_lin(pos)
@@ -501,12 +491,12 @@ class DootCbfCoordinator:
         # ------------------------------------------------------------
         # 5) Transport step via trial moves (nominal)
         # ------------------------------------------------------------
-        v_nom = np.zeros((self.num_vehicles, 3), dtype=float)
+        v_nom = np.zeros((self._num_vehicles, 3), dtype=float)
 
-        disp = self.rng.normal(
-            loc=self.mean_trial_move,
-            scale=np.sqrt(self.var_trial_move),
-            size=(int(self.doot_config.num_trial_move_samples), 3),
+        disp = self._rng.normal(
+            loc=self._mean_trial_move,
+            scale=np.sqrt(self._var_trial_move),
+            size=(int(self._doot_config.num_trial_move_samples), 3),
         )
 
         if planar:
@@ -514,16 +504,16 @@ class DootCbfCoordinator:
             disp[:, dropped_axis] = 0.0
 
         norms = np.linalg.norm(disp, axis=1)
-        keep = norms >= float(self.doot_config.min_displacement_norm)
+        keep = norms >= float(self._doot_config.min_displacement_norm)
         disp_kept = disp[keep]
         norms_kept = norms[keep]
 
         if disp_kept.shape[0] == 0:
-            self.set_transport_vel_batch(np.zeros((self.num_vehicles, 3), dtype=float))
+            self._set_vel_cmds(np.zeros((self._num_vehicles, 3)))
             self._positions_prev_cbf = positions.copy()
             return
 
-        for vehicle_idx in range(self.num_vehicles):
+        for vehicle_idx in range(self._num_vehicles):
             pos_trial = positions[vehicle_idx, :][None, :] + disp_kept  # (K,3)
 
             if planar:
@@ -539,21 +529,31 @@ class DootCbfCoordinator:
         # ------------------------------------------------------------
         # 6) Optional CBF filtering
         # ------------------------------------------------------------
-        if not self.apply_cbf:
-            self.set_transport_vel_batch(v_nom)
+        if not self._apply_cbf:
+            self._set_vel_cmds(v_nom)
             self._positions_prev_cbf = positions.copy()
             return
 
-        if self.cbf_config is None:
+        if self._cbf_config is None:
             raise RuntimeError("apply_cbf=True but cbf_config is None.")
 
         v = v_nom.copy()
         positions_prev = self._positions_prev_cbf
 
-        for vehicle_idx in range(self.num_vehicles):
+        for vehicle_idx in range(self._num_vehicles):
             rho_m, grad_rho_m = self._compute_kde_density_and_gradient(
                 positions_prev, vehicle_idx, planar=planar, axes_2d=axes_2d)
             v[vehicle_idx, :] = self._apply_cbf_projection(v_nom[vehicle_idx, :], rho_m, grad_rho_m)
 
-        self.set_transport_vel_batch(v)
+        self._set_vel_cmds(v)
         self._positions_prev_cbf = positions.copy()
+
+
+    def get_vel_cmds(self) -> np.ndarray:
+        """
+        Get the latest velocity commands for all vehicles.
+
+        Returns:
+            np.ndarray: An array of velocity commands
+        """
+        return self._vel_cmds

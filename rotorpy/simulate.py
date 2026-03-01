@@ -179,14 +179,14 @@ def simulate_swarm(world, wind_profile,
     used_indices = set()
 
     for c in coordinators:
-        if not hasattr(c, "vehicles"):
+        if not hasattr(c, "_vehicles"):
             raise ValueError(
-                "simulate_swarm(): coordinator must have attribute `vehicles` "
+                "simulate_swarm(): coordinator must have attribute `_vehicles` "
                 "(list of member vehicle objects)."
             )
 
         idxs: List[int] = []
-        for v in c.vehicles:
+        for v in c._vehicles:
             key = id(v)
             if key not in veh_to_idx:
                 raise ValueError(
@@ -250,6 +250,9 @@ def simulate_swarm(world, wind_profile,
         state[0]['wind'] = wind_profile.update(0, state[0]['x'])
 
         # Initialize the flats
+        # If trajectory is VelocityReference (push-based), it requires an initial vel_cmd before update().
+        if hasattr(trajectory, "set_vel_cmd"):
+            trajectory.set_vel_cmd(np.zeros(3, dtype=float))
         flats.append([trajectory.update(time[-1])])
         flat = flats[idx]
 
@@ -286,6 +289,14 @@ def simulate_swarm(world, wind_profile,
         for c, idxs in zip(coordinators, coord_vehicle_indices):
             member_states = [states[i][-1] for i in idxs]  # latest states for member vehicles
             c.step(t_global, member_states)
+
+            # Push coordinator velocity commands into per-vehicle VelocityReference trajectories (if used).
+            if hasattr(c, "get_vel_cmds"):
+                vel_cmds = np.asarray(c.get_vel_cmds(), dtype=float)
+                for j, gi in enumerate(idxs):
+                    traj = trajectories[gi]
+                    if hasattr(traj, "set_vel_cmd"):
+                        traj.set_vel_cmd(vel_cmds[j])
 
         # Update each vehicle
         for idx in range(num_vehicles):

@@ -607,9 +607,14 @@ def run_world(args):
 
     # ===================== Trajectories (now init_poss exists) =====================
 
-    v_cmd_fns = coordinator.get_transport_vel_fns()
     trajectories = [
-        VelocityReference(v_cmd_fns[i], init_poss[i]["x"])
+        VelocityReference(
+            init_pos=init_poss[i]["x"],
+            init_yaw=0.0,
+            init_time=0.0,
+            yaw_mode="velocity_heading",
+            yaw_speed_eps=1e-3,
+        )
         for i in range(num_vehicles)
     ]
 

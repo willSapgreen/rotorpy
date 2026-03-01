@@ -1,12 +1,17 @@
+from __future__ import annotations
+
+from typing import Optional, Dict, Union
 import numpy as np
+import torch
 
 
-class VelocityReference(object):
+class VelocityReference:
     """
     Velocity-driven reference generator (2nd-order command filter on velocity).
 
     Public interface:
-      - __init__(v_cmd_fn, init_pos, init_yaw=0.0, yaw_mode="velocity_heading", yaw_speed_eps=1e-3)
+      - __init__(init_pos, init_yaw=0.0, init_time=0.0,
+                 yaw_mode="velocity_heading", yaw_speed_eps=1e-3)
       - update(t) -> flat_output dict with keys:
           x, x_dot, x_ddot, x_dddot, x_ddddot, yaw, yaw_dot, yaw_ddot
 
@@ -17,65 +22,62 @@ class VelocityReference(object):
     Discretized with explicit Euler using dt between update calls.
 
     Tunable attributes (set after construction if desired):
-      self.omega (rad/s), self.zeta
-      self.v_max (m/s), self.a_max (m/s^2), self.j_max (m/s^3)
-      self.yaw_rate_max (rad/s)
+      self._omega (rad/s), self._zeta
+      self._v_max (m/s), self._a_max (m/s^2), self._j_max (m/s^3)
+      self._yaw_rate_max (rad/s)
     """
 
-    def __init__(self, v_cmd_fn, init_pos, init_yaw=0.0,
-                 yaw_mode="velocity_heading",
-                 yaw_speed_eps=1e-3):
-        self.v_cmd_fn = v_cmd_fn
+    def __init__(
+        self,
+        init_pos: np.ndarray,          # shape (3,)
+        init_yaw: float = 0.0,
+        init_time: float = 0.0,
+        yaw_mode: str = "velocity_heading",
+        yaw_speed_eps: float = 1e-3,
+    ) -> None:
 
-        self.x_ref = np.array(init_pos, dtype=float).copy()
+        # Initialize the states
+        self._pos: np.ndarray = init_pos.astype(float).copy()
+        self._yaw: float = float(init_yaw)
+        self._yaw_mode: str = yaw_mode
+        self._yaw_speed_eps: float = float(yaw_speed_eps)
+        self._last_t: float = float(init_time)
 
-        self.yaw_mode = yaw_mode
-        self.yaw_speed_eps = float(yaw_speed_eps)
+        self._next_vel_cmd: np.ndarray = np.zeros(3, dtype=float)
+        self._has_vel_cmd: bool = False
 
-        self._last_t = None
+        # Set up the default config
+        # ToDo: make them configurable
+        self._omega: float = 6.0   # rad/s
+        self._zeta: float = 1.0    # critically damped
+        self._v_max: Optional[float] = None         # m/s cap on ||v||
+        self._a_max: Optional[float] = None         # m/s^2 cap on ||a||
+        self._j_max: Optional[float] = None         # m/s^3 cap on ||a_dot||
+        self._yaw_rate_max: Optional[float] = None  # rad/s cap on |yaw_dot|
 
-        # Defaults (adjust as needed)
-        self.omega = 6.0   # rad/s
-        self.zeta = 1.0    # critically damped
+        # Set filter states
+        self._initialized: bool = False
+        self._v: np.ndarray = np.zeros(3, dtype=float)  # filtered velocity v_d
+        self._a: np.ndarray = np.zeros(3, dtype=float)  # filtered acceleration a_d
 
-        self.v_max = None         # m/s cap on ||v||
-        self.a_max = None         # m/s^2 cap on ||a||
-        self.j_max = None         # m/s^3 cap on ||a_dot||
-        self.yaw_rate_max = None  # rad/s cap on |yaw_dot|
 
-        # Filter states
-        self._initialized = False
-        self._v = np.zeros(3, dtype=float)  # filtered velocity v_d
-        self._a = np.zeros(3, dtype=float)  # filtered acceleration a_d
+    def set_vel_cmd(self, v_cmd: np.ndarray) -> None:
+        self._next_vel_cmd = v_cmd.copy()
+        self._has_vel_cmd = True
 
-        # Yaw state (continuous)
-        self._yaw = float(init_yaw)
 
-    @staticmethod
-    def _wrap_pi(angle):
-        return (angle + np.pi) % (2.0 * np.pi) - np.pi
+    def update(self, t: float) -> Dict[str, np.ndarray | float]:
 
-    @staticmethod
-    def _clip_norm(vec, max_norm):
-        if max_norm is None:
-            return vec
-        n = float(np.linalg.norm(vec))
-        if n < 1e-12:
-            return vec
-        if n > max_norm:
-            return vec * (max_norm / n)
-        return vec
+        if not self._has_vel_cmd:
+            raise RuntimeError("Next velocity command is invalid")
 
-    def update(self, t):
+        # Calculate delta time
         t = float(t)
-        if self._last_t is None:
-            dt = 0.0
-        else:
-            dt = max(0.0, t - self._last_t)
+        if t < self._last_t:
+            raise RuntimeError(f"Time went backwards: t={t} < last_t={self._last_t}")
+        dt: float = t - self._last_t
 
-        # Raw command from DOOT/CBF
-        v_cmd = np.array(self.v_cmd_fn(t), dtype=float).reshape(3)
-        v_cmd = self._clip_norm(v_cmd, self.v_max)
+        v_cmd = self._clip_norm(self._next_vel_cmd, self._v_max)
 
         # Initialize filter state on first call
         if not self._initialized:
@@ -85,25 +87,25 @@ class VelocityReference(object):
 
         # 2nd-order filter update (explicit Euler)
         if dt > 0.0:
-            w = float(self.omega)
-            z = float(self.zeta)
+            w = self._omega
+            z = self._zeta
 
             # a_dot (jerk)
-            a_dot = -2.0 * z * w * self._a - (w * w) * (self._v - v_cmd)
+            a_dot = -2*z*w*self._a - (w*w)*(self._v - v_cmd)
 
             # Optional jerk cap
-            a_dot = self._clip_norm(a_dot, self.j_max)
+            a_dot = self._clip_norm(a_dot, self._j_max)
 
             # Integrate accel
-            a_new = self._a + dt * a_dot
-            a_new = self._clip_norm(a_new, self.a_max)
+            a_new = self._a + dt*a_dot
+            a_new = self._clip_norm(a_new, self._a_max)
 
             # Integrate velocity
-            v_new = self._v + dt * a_new
-            v_new = self._clip_norm(v_new, self.v_max)
+            v_new = self._v + dt*a_new
+            v_new = self._clip_norm(v_new, self._v_max)
 
             # Integrate position reference
-            self.x_ref = self.x_ref + dt * v_new
+            self._pos = self._pos + dt*v_new
 
             # Commit filter states
             self._a = a_new
@@ -111,17 +113,13 @@ class VelocityReference(object):
 
         # Yaw handling (based on filtered velocity)
         yaw = self._yaw
-        yaw_dot = 0.0
+        yaw_dot: float = 0.0
 
-        if self.yaw_mode == "constant":
-            yaw = self._yaw
-            yaw_dot = 0.0
+        if self._yaw_mode == "velocity_heading":
+            vx, vy = self._v[0], self._v[1]
+            s2 = vx*vx + vy*vy
 
-        elif self.yaw_mode == "velocity_heading":
-            vx, vy = float(self._v[0]), float(self._v[1])
-            s2 = vx * vx + vy * vy
-
-            if s2 > self.yaw_speed_eps ** 2 and dt > 0.0:
+            if s2 > self._yaw_speed_eps**2 and dt > 0.0:
                 yaw_new = float(np.arctan2(vy, vx))
 
                 # Continuous yaw update
@@ -129,27 +127,142 @@ class VelocityReference(object):
                 yaw = self._yaw + dyaw
                 yaw_dot = dyaw / dt
 
-                if self.yaw_rate_max is not None:
-                    yaw_dot = float(np.clip(yaw_dot, -self.yaw_rate_max, self.yaw_rate_max))
-            else:
-                yaw = self._yaw
-                yaw_dot = 0.0
+                if self._yaw_rate_max is not None:
+                    yaw_dot = float(np.clip(yaw_dot, -self._yaw_rate_max, self._yaw_rate_max))
 
-        else:
-            raise ValueError(f"Unknown yaw_mode: {self.yaw_mode}")
-
-        # Commit time + yaw
         self._last_t = t
-        self._yaw = float(yaw)
+        self._yaw = yaw
 
-        flat_output = {
-            'x': self.x_ref.copy(),
+        return {
+            'x': self._pos.copy(),
             'x_dot': self._v.copy(),
             'x_ddot': self._a.copy(),
             'x_dddot': np.zeros(3),
             'x_ddddot': np.zeros(3),
-            'yaw': float(yaw),
-            'yaw_dot': float(yaw_dot),
+            'yaw': yaw,
+            'yaw_dot': yaw_dot,
             'yaw_ddot': 0.0,
         }
-        return flat_output
+
+
+    @staticmethod
+    def _wrap_pi(angle: float) -> float:
+        return (angle + np.pi) % (2*np.pi) - np.pi
+
+
+    @staticmethod
+    def _clip_norm(vec: np.ndarray, max_norm: Optional[float]) -> np.ndarray:
+        if max_norm is None:
+            return vec
+        n = float(np.linalg.norm(vec))
+        if n < 1e-12:
+            return vec
+        if n > max_norm:
+            return vec * (max_norm / n)
+        return vec
+
+
+class BatchedVelocityReference:
+    """
+    Batched velocity-driven reference generator (2nd-order command filter on velocity).
+
+    Same 2nd-order filter:
+      v_dot = a
+      a_dot = -2*zeta*omega*a - omega^2*(v - v_cmd)
+
+    Explicit Euler integration per time step.
+    """
+
+    def __init__(
+        self,
+        init_pos: torch.Tensor,   # shape (N,3)
+        init_yaw: float = 0.0,
+        init_time: float = 0.0,
+        yaw_mode: str = "velocity_heading",
+        yaw_speed_eps: float = 1e-3,
+    ) -> None:
+
+        self.N: int = init_pos.shape[0]
+        self.device = init_pos.device
+
+        # Initialize the states
+        self._pos: torch.Tensor = init_pos.clone()
+        self._yaw: torch.Tensor = torch.full((self.N,), init_yaw, device=self.device, dtype=torch.float64)
+        self._last_t: torch.Tensor = torch.full((self.N,), init_time, device=self.device, dtype=torch.float64)
+
+        self._next_vel_cmd: torch.Tensor = torch.zeros((self.N,3), device=self.device, dtype=torch.float64)
+        self._has_vel_cmd: bool = False
+
+        # Default config
+        self._omega: float = 6.0
+        self._zeta: float = 1.0
+        self._v_max: Optional[float] = None
+        self._a_max: Optional[float] = None
+        self._j_max: Optional[float] = None
+        self._yaw_rate_max: Optional[float] = None
+
+        # Filter states
+        self._initialized: bool = False
+        self._v: torch.Tensor = torch.zeros_like(self._pos)
+        self._a: torch.Tensor = torch.zeros_like(self._pos)
+
+        self._yaw_mode = yaw_mode
+        self._yaw_speed_eps = yaw_speed_eps
+
+    def set_vel_cmd(self, v_cmd: torch.Tensor) -> None:
+        self._next_vel_cmd = v_cmd.clone()
+        self._has_vel_cmd = True
+
+    def update(self, t: Union[float, torch.Tensor]) -> Dict[str, torch.Tensor]:
+
+        if not self._has_vel_cmd:
+            raise RuntimeError("Next velocity command is invalid")
+
+        if isinstance(t, float):
+            t_vec = torch.full((self.N,), t, device=self.device, dtype=torch.float64)
+        else:
+            t_vec = t
+
+        if torch.any(t_vec < self._last_t):
+            raise RuntimeError("Time went backwards")
+
+        dt = t_vec - self._last_t
+        v_cmd = self._clip_norm_batch(self._next_vel_cmd, self._v_max)
+
+        if not self._initialized:
+            self._v = v_cmd.clone()
+            self._initialized = True
+
+        dt_mask = dt > 0
+
+        if torch.any(dt_mask):
+            w, z = self._omega, self._zeta
+
+            a_dot = -2*z*w*self._a - (w*w)*(self._v - v_cmd)
+            a_dot = self._clip_norm_batch(a_dot, self._j_max)
+
+            a_new = self._a + dt.unsqueeze(1)*a_dot
+            a_new = self._clip_norm_batch(a_new, self._a_max)
+
+            v_new = self._v + dt.unsqueeze(1)*a_new
+            v_new = self._clip_norm_batch(v_new, self._v_max)
+
+            self._pos = torch.where(dt_mask.unsqueeze(1), self._pos + dt.unsqueeze(1)*v_new, self._pos)
+            self._a = torch.where(dt_mask.unsqueeze(1), a_new, self._a)
+            self._v = torch.where(dt_mask.unsqueeze(1), v_new, self._v)
+
+        self._last_t = t_vec
+
+        return {
+            "x": self._pos.clone(),
+            "x_dot": self._v.clone(),
+            "x_ddot": self._a.clone(),
+        }
+
+    @staticmethod
+    def _clip_norm_batch(vec: torch.Tensor, max_norm: Optional[float]) -> torch.Tensor:
+        if max_norm is None:
+            return vec
+        n = torch.linalg.norm(vec, dim=1).clamp(min=1e-12)
+        scale = torch.clamp(max_norm / n, max=1.0)
+        return vec * scale.unsqueeze(1)
