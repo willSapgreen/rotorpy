@@ -129,17 +129,17 @@ sim_instance.vehicle.initial_state = x0
 # All the arguments are listed below with their descriptions.
 # You can save the animation (if animating) using the fname argument. Default is None which won't save it.
 
-results = sim_instance.run(t_final      = 20,       # The maximum duration of the environment in seconds
+results = sim_instance.run(t_final      = 20,         # The maximum duration of the environment in seconds
                            use_mocap    = True,       # Boolean: determines if the controller should use the motion capture estimates.
-                           terminate    = False,       # Boolean: if this is true, the simulator will terminate when it reaches the last waypoint.
-                           plot            = True,     # Boolean: plots the vehicle states and commands
-                           plot_mocap      = True,     # Boolean: plots the motion capture pose and twist measurements
-                           plot_estimator  = True,     # Boolean: plots the estimator filter states and covariance diagonal elements
-                           plot_imu        = True,     # Boolean: plots the IMU measurements
-                           animate_bool    = True,     # Boolean: determines if the animation of vehicle state will play.
+                           terminate    = False,      # Boolean: if this is true, the simulator will terminate when it reaches the last waypoint.
+                           plot            = True,    # Boolean: plots the vehicle states and commands
+                           plot_mocap      = True,    # Boolean: plots the motion capture pose and twist measurements
+                           plot_estimator  = True,    # Boolean: plots the estimator filter states and covariance diagonal elements
+                           plot_imu        = True,    # Boolean: plots the IMU measurements
+                           animate_bool    = True,    # Boolean: determines if the animation of vehicle state will play.
                            animate_wind    = True,    # Boolean: determines if the animation will include a scaled wind vector to indicate the local wind acting on the UAV.
-                           verbose         = True,     # Boolean: will print statistics regarding the simulation.
-                           fname   = None # Filename is specified if you want to save the animation. The save location is rotorpy/data_out/.
+                           verbose         = True,    # Boolean: will print statistics regarding the simulation.
+                           fname   = "basic_usage"    # Filename is specified if you want to save the animation. The save location is rotorpy/data_out/.
                     )
 
 # There are booleans for if you want to plot all/some of the results, animate the multirotor, and
