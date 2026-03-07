@@ -281,10 +281,10 @@ def simulate_batch(
         if not torch.is_tensor(initial_states[k]):
             raise ValueError(f"initial_states[{k}] must be a torch.Tensor")
 
-    B = vehicles.num_drones
+    num_drones = vehicles.num_drones
 
     if wind_profile is None:
-        wind_profile = rotorpy.wind.default_winds.BatchedNoWind(B)
+        wind_profile = rotorpy.wind.default_winds.BatchedNoWind(num_drones)
 
     if len(world.world["blocks"]) > 0:
         raise Warning("Batched simulation does not check for collisions.")
@@ -301,14 +301,14 @@ def simulate_batch(
 
     # Time array (kept as numpy because your exit helpers expect numpy time arrays)
     if start_times is None:
-        time_array = [np.zeros(B, dtype=float)]
+        time_array = [np.zeros(num_drones, dtype=float)]
     else:
-        time_array = [np.asarray(start_times, dtype=float).reshape(B,)]
+        time_array = [np.asarray(start_times, dtype=float).reshape(num_drones,)]
 
-    exit_status = np.array([None] * B, dtype=object)
-    done = np.zeros(B, dtype=bool)
-    running_idxs = np.arange(B, dtype=int)
-    exit_timesteps = np.zeros(B, dtype=int)
+    exit_status = np.array([None] * num_drones, dtype=object)
+    done = np.zeros(num_drones, dtype=bool)
+    running_idxs = np.arange(num_drones, dtype=int)
+    exit_timesteps = np.zeros(num_drones, dtype=int)
 
     state = [copy.deepcopy(initial_states)]
 
@@ -318,12 +318,12 @@ def simulate_batch(
     # ---------
     device = state[-1]["x"].device
     dtype = state[-1]["x"].dtype
-    vel_cmds0 = torch.zeros((B, 3), device=device, dtype=dtype)
+    vel_cmds0 = torch.zeros((num_drones, 3), device=device, dtype=dtype)
 
     if coordinators is not None:
         # build initial vel_cmds from coordinators
         for coord in coordinators:
-            idxs_np = get_coord_indices_batch(coord, B)
+            idxs_np = get_coord_indices_batch(coord, num_drones)
             member_states = [{"x": state[-1]["x"][i]} for i in idxs_np]
             coord.step(float(time_array[-1][0]), member_states)
             v_c = coord.get_vel_cmds()  # torch (Nc,3)
@@ -333,7 +333,7 @@ def simulate_batch(
     if hasattr(trajectories, "set_vel_cmd"):
         trajectories.set_vel_cmd(vel_cmds0)
 
-    # flat output expects time vector (B,)
+    # flat output expects time vector (num_drones,)
     # flat = [trajectories.update(torch.as_tensor(time_array[-1], device=device, dtype=dtype))]
     flat = [trajectories.update(time_array[-1])]
 
@@ -360,17 +360,27 @@ def simulate_batch(
         step_start_time = time.time()
         prev_status = np.array(done, dtype=bool)
 
-        # exits (your existing helpers)
+        # exits
         se = safety_exit_batch(world, safety_margin, state[-1], flat[-1], control[-1])
         ne = normal_exit(time_array[-1], state[-1])
         te = time_exit_batch(time_array[-1], t_final)
 
-        exit_status[running_idxs] = np.where(se[running_idxs], ExitStatus.OVER_SPEED, None)
-        exit_status[running_idxs] = np.where(ne[running_idxs], ExitStatus.COMPLETE, None)
-        exit_status[running_idxs] = np.where(te[running_idxs], ExitStatus.TIMEOUT, None)
+        # safety exit
+        exit_status[running_idxs] = np.where(se[running_idxs], ExitStatus.OVER_SPEED, exit_status[running_idxs])
 
+        # normal exit (only if enabled)
+        if ne is not None:
+            exit_status[running_idxs] = np.where(ne[running_idxs], ExitStatus.COMPLETE, exit_status[running_idxs])
+
+        # time exit
+        exit_status[running_idxs] = np.where(te[running_idxs], ExitStatus.TIMEOUT, exit_status[running_idxs])
+
+        # update done mask
         done = np.logical_or(done, se)
-        done = np.logical_or(done, ne)
+
+        if ne is not None:
+            done = np.logical_or(done, ne)
+
         done = np.logical_or(done, te)
 
         done_this_iter = np.logical_xor(prev_status, done)
@@ -393,9 +403,9 @@ def simulate_batch(
         # Coordinator path (optional)
         # ---------
         if coordinators is not None:
-            vel_cmds = torch.zeros((B, 3), device=device, dtype=dtype)
+            vel_cmds = torch.zeros((num_drones, 3), device=device, dtype=dtype)
             for coord in coordinators:
-                idxs_np = get_coord_indices_batch(coord, B)
+                idxs_np = get_coord_indices_batch(coord, num_drones)
                 member_states = [{"x": state[-1]["x"][i]} for i in idxs_np]
                 coord.step(float(time_array[-1][0]), member_states)
                 v_c = coord.get_vel_cmds()  # torch (Nc,3)
@@ -456,7 +466,7 @@ def simulate_batch(
     )
 
 
-def get_coord_indices_batch(coord, B: int) -> np.ndarray:
+def get_coord_indices_batch(coord, num_drones: int) -> np.ndarray:
     """Return global drone indices for this coordinator in batched simulation."""
     if hasattr(coord, "get_indices"):
         idxs = coord.get_indices()
@@ -477,8 +487,8 @@ def get_coord_indices_batch(coord, B: int) -> np.ndarray:
 
     if idxs_np.size == 0:
         raise ValueError("simulate_batch(): coordinator has empty indices (not allowed).")
-    if np.any(idxs_np < 0) or np.any(idxs_np >= B):
-        raise ValueError(f"simulate_batch(): coordinator indices out of range [0, {B-1}]")
+    if np.any(idxs_np < 0) or np.any(idxs_np >= num_drones):
+        raise ValueError(f"simulate_batch(): coordinator indices out of range [0, {num_drones-1}]")
     return idxs_np
 
 

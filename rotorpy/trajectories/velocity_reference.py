@@ -213,15 +213,33 @@ class BatchedVelocityReference:
         self._next_vel_cmd = v_cmd.clone()
         self._has_vel_cmd = True
 
-    def update(self, t: Union[float, torch.Tensor]) -> Dict[str, torch.Tensor]:
 
+    def update(self, t) -> Dict[str, torch.Tensor]:
         if not self._has_vel_cmd:
             raise RuntimeError("Next velocity command is invalid")
 
-        if isinstance(t, float):
-            t_vec = torch.full((self.N,), t, device=self.device, dtype=torch.float64)
+        # Accept float / numpy / torch, normalize to torch (N,) on self.device
+        if isinstance(t, (float, int, np.floating, np.integer)):
+            t_vec = torch.full((self.N,), float(t), device=self.device, dtype=torch.float64)
+
+        elif isinstance(t, np.ndarray):
+            t_np = np.asarray(t, dtype=float).reshape(-1)
+            if t_np.size == 1:
+                t_vec = torch.full((self.N,), float(t_np.item()), device=self.device, dtype=torch.float64)
+            else:
+                if t_np.size != self.N:
+                    raise ValueError(f"Expected numpy time array of shape ({self.N},), got ({t_np.size},)")
+                t_vec = torch.as_tensor(t_np, device=self.device, dtype=torch.float64)
+
+        elif torch.is_tensor(t):
+            # allow scalar tensor or (N,) tensor
+            if t.numel() == 1:
+                t_vec = torch.full((self.N,), float(t.item()), device=self.device, dtype=torch.float64)
+            else:
+                t_vec = t.to(device=self.device, dtype=torch.float64).reshape(self.N,)
+
         else:
-            t_vec = t
+            raise TypeError(f"Unsupported time type: {type(t)}")
 
         if torch.any(t_vec < self._last_t):
             raise RuntimeError("Time went backwards")
@@ -251,12 +269,49 @@ class BatchedVelocityReference:
             self._a = torch.where(dt_mask.unsqueeze(1), a_new, self._a)
             self._v = torch.where(dt_mask.unsqueeze(1), v_new, self._v)
 
+        # -------------------------
+        # Yaw handling (batched, based on filtered velocity)
+        # -------------------------
+        yaw = self._yaw.clone()
+        yaw_dot = torch.zeros((self.N,), device=self.device, dtype=torch.float64)
+
+        if self._yaw_mode == "velocity_heading":
+            vx = self._v[:, 0]
+            vy = self._v[:, 1]
+            s2 = vx * vx + vy * vy
+
+            # only update yaw where speed is sufficient AND dt > 0
+            active = (s2 > (self._yaw_speed_eps ** 2)) & (dt > 0)
+
+            if torch.any(active):
+                yaw_new = torch.atan2(vy, vx)
+                dyaw = self._wrap_pi_batch(yaw_new - self._yaw)
+                yaw = torch.where(active, self._yaw + dyaw, yaw)
+
+                # yaw rate
+                yaw_dot_active = dyaw / dt.clamp(min=1e-12)
+                yaw_dot = torch.where(active, yaw_dot_active, yaw_dot)
+
+                if self._yaw_rate_max is not None:
+                    yaw_dot = torch.clamp(yaw_dot, -float(self._yaw_rate_max), float(self._yaw_rate_max))
+
+        # Commit yaw
+        self._yaw = yaw
+
+        # Update time
         self._last_t = t_vec
 
+        zeros3 = torch.zeros((self.N, 3), device=self.device, dtype=torch.float64)
+        zeros1 = torch.zeros((self.N,), device=self.device, dtype=torch.float64)
         return {
             "x": self._pos.clone(),
             "x_dot": self._v.clone(),
             "x_ddot": self._a.clone(),
+            "x_dddot": zeros3,     # jerk (not modeled in this ref; set 0 like non-batched)
+            "x_ddddot": zeros3,    # snap (set 0)
+            "yaw": self._yaw.clone(),
+            "yaw_dot": yaw_dot.clone(),
+            "yaw_ddot": zeros1,    # yaw accel (set 0)
         }
 
     @staticmethod
@@ -266,3 +321,8 @@ class BatchedVelocityReference:
         n = torch.linalg.norm(vec, dim=1).clamp(min=1e-12)
         scale = torch.clamp(max_norm / n, max=1.0)
         return vec * scale.unsqueeze(1)
+
+    @staticmethod
+    def _wrap_pi_batch(angle: torch.Tensor) -> torch.Tensor:
+        # Map to (-pi, pi]
+        return (angle + torch.pi) % (2.0 * torch.pi) - torch.pi

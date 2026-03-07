@@ -140,18 +140,18 @@ def main():
     # Define this object which contains dynamics params for each of the drones.
     # If the batch size is large, this can save memory by sharing the dynamics params across the controller and
     # multirotor object.
-    batch_params = BatchedMultirotorParams(all_quad_params, num_drones, device)
+    batched_params = BatchedMultirotorParams(all_quad_params, num_drones, device)
 
     # Define a batched controller object which lets us compute control inputs for all drones in the batch at the
     # same time. Note that currently, all drones in the batch must share the same quad_params.
-    controller = BatchedSE3Control(batch_params, num_drones, device=device,
+    batched_controller = BatchedSE3Control(batched_params, num_drones, device=device,
                                    kp_pos=kp_pos, kd_pos=kd_pos,
                                    kp_att=kp_att, kd_att=kd_att)
 
     # Define a batched multirotor, which simulates all drones in the batch simultaneously.
     # Choose 'dopri5' to mimic scipy's default solve_ivp behavior with an adaptive step size, or 'rk4'
     # for a fixed step-size integrator, which is lower-fidelity but much faster.
-    vehicle = BatchedMultirotor(batch_params, num_drones, x0, device=device, integrator='dopri5', control_abstraction=control_abstraction)
+    vehicle = BatchedMultirotor(batched_params, num_drones, x0, device=device, integrator='dopri5', control_abstraction=control_abstraction)
 
     # Optional: define when each drone in the batch should terminate.
     dt = 0.01
@@ -194,7 +194,7 @@ def main():
     results = simulate_batch(world,
                              x0,
                              vehicle,
-                             controller,
+                             batched_controller,
                              batched_trajs,
                              wind_profile,
                              batched_imu,

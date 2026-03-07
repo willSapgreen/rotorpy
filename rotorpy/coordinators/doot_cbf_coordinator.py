@@ -1,7 +1,11 @@
-import numpy as np
-from dataclasses import dataclass, field
-from typing import Callable, List, Optional, Dict, Any, Tuple
+from __future__ import annotations
+
 import math
+from dataclasses import dataclass, field
+from typing import Callable, List, Optional, Dict, Any, Tuple, Union
+
+import numpy as np
+import torch
 from scipy.interpolate import LinearNDInterpolator, NearestNDInterpolator
 
 
@@ -110,6 +114,7 @@ class DootCbfCoordinator:
         doot_config: DootConfig,
         apply_cbf: bool = False,
         cbf_config: Optional[CbfConfig] = None,
+        idxs: Optional[List[int]] = None,
     ):
         # Initialize vehicles setting
         self._vehicles = vehicles
@@ -174,6 +179,29 @@ class DootCbfCoordinator:
 
         # CBF runtime state (previous positions only)
         self._positions_prev_cbf: Optional[np.ndarray] = None
+
+        # Store indices for this coordinator (subset of the full swarm)
+        if idxs is None:
+            raise ValueError(
+                "idxs must be provided when using multiple coordinators (global indexing required)."
+            )
+
+        self._idxs = np.asarray(idxs, dtype=int).reshape(-1)
+
+        if self._idxs.size < 1:
+            raise ValueError("idxs must be non-empty.")
+        if np.any(self._idxs < 0):
+            raise ValueError("idxs must be nonnegative.")
+
+        # KEY CHECK: subset sizes must match
+        if self._idxs.size != len(vehicles):
+            raise ValueError(
+                f"idxs length ({self._idxs.size}) must match len(vehicles) ({len(vehicles)})."
+            )
+
+        # OPTIONAL (recommended): indices must be unique within this coordinator
+        if np.unique(self._idxs).size != self._idxs.size:
+            raise ValueError("idxs must not contain duplicates within a coordinator.")
 
 
     def _set_vel_cmds(self, vel_batch: np.ndarray) -> None:
@@ -337,6 +365,10 @@ class DootCbfCoordinator:
             vel = vel * (1.0 / vel_norm)
 
         return vel
+
+
+    def get_indices(self) -> np.ndarray:
+        return self._idxs.copy()
 
 
     def step(self, cur_time: float, states: List[Dict[str, Any]]) -> None:
@@ -557,3 +589,378 @@ class DootCbfCoordinator:
             np.ndarray: An array of velocity commands
         """
         return self._vel_cmds
+
+
+class BatchedDootCbfCoordinator:
+    """
+    Full torch-native version:
+      - targets stored as torch.Tensor
+      - interpolation via torch kNN inverse-distance weighting
+      - outputs vel_cmds as torch.Tensor (N,3)
+
+    Intended wiring:
+      dcc.step(t, states)
+      v_cmds = dcc.get_vel_cmds()            # torch (N,3)
+      batched_vr.set_vel_cmd(v_cmds)         # torch-native VF :contentReference[oaicite:3]{index=3}
+    """
+
+    _FIXED_SEED: int = 20220610
+
+    def __init__(
+        self,
+        *,
+        vehicles: List[Any],
+        targeted_positions: torch.Tensor,   # (M,3) torch
+        doot_config: DootConfig,
+        velocity_max: Optional[float] = None,
+        apply_cbf: bool = False,
+        cbf_config: Optional[CbfConfig] = None,
+        dtype: torch.dtype = torch.float64,
+        device: Optional[torch.device] = None,
+        idxs: Optional[List[int]] = None,
+    ) -> None:
+        self._vehicles: List[Any] = vehicles
+        self._num_vehicles: int = len(vehicles)
+        if self._num_vehicles < 1:
+            raise ValueError("vehicles must be non-empty.")
+
+        self._dtype = dtype
+        self._device = device if device is not None else targeted_positions.device
+
+        self._targeted_positions: torch.Tensor = targeted_positions.to(device=self._device, dtype=self._dtype)
+        if self._targeted_positions.ndim != 2 or self._targeted_positions.shape[1] != 3:
+            raise ValueError(f"targeted_positions must be shape (M,3), got {tuple(self._targeted_positions.shape)}")
+
+        self._doot = doot_config
+        self._velocity_max = velocity_max
+
+        self._apply_cbf = bool(apply_cbf)
+        self._cbf = cbf_config
+        if self._apply_cbf and self._cbf is None:
+            raise ValueError("apply_cbf=True requires cbf_config.")
+
+        # internal state
+        self._phi: torch.Tensor = torch.zeros((self._num_vehicles,), device=self._device, dtype=self._dtype)
+        self._last_time: Optional[float] = None
+        self._positions_prev_cbf: Optional[torch.Tensor] = None  # (N,3)
+
+        self._vel_cmds: torch.Tensor = torch.zeros((self._num_vehicles, 3), device=self._device, dtype=self._dtype)
+
+        seed = None if self._doot.use_random_sampling else self._FIXED_SEED
+        self._rng = torch.Generator(device="cpu")
+        if seed is not None:
+            self._rng.manual_seed(int(seed))
+
+        # trial move distribution
+        if self._doot.mean_trial_move is None:
+            self._mean = torch.zeros((3,), dtype=self._dtype, device="cpu")
+        else:
+            self._mean = torch.tensor(self._doot.mean_trial_move, dtype=self._dtype, device="cpu").reshape(3,)
+
+        if self._doot.var_trial_move is None:
+            self._var = torch.tensor([0.05, 0.05, 0.05], dtype=self._dtype, device="cpu")
+        else:
+            self._var = torch.tensor(self._doot.var_trial_move, dtype=self._dtype, device="cpu").reshape(3,)
+
+        if torch.any(self._var < 0.0):
+            raise ValueError("var_trial_move must be nonnegative.")
+
+        # Store indices for this coordinator (subset of the full swarm)
+        if idxs is None:
+            raise ValueError(
+                "idxs must be provided when using multiple coordinators (global indexing required)."
+            )
+
+        self._idxs = np.asarray(idxs, dtype=int).reshape(-1)
+
+        if self._idxs.size < 1:
+            raise ValueError("idxs must be non-empty.")
+        if np.any(self._idxs < 0):
+            raise ValueError("idxs must be nonnegative.")
+
+        # KEY CHECK: subset sizes must match
+        if self._idxs.size != len(vehicles):
+            raise ValueError(
+                f"idxs length ({self._idxs.size}) must match len(vehicles) ({len(vehicles)})."
+            )
+
+        # OPTIONAL (recommended): indices must be unique within this coordinator
+        if np.unique(self._idxs).size != self._idxs.size:
+            raise ValueError("idxs must not contain duplicates within a coordinator.")
+
+
+    def get_indices(self) -> np.ndarray:
+        return self._idxs.copy()
+
+
+    def get_vel_cmds(self) -> torch.Tensor:
+        return self._vel_cmds
+
+
+    def _set_vel_cmds(self, v: torch.Tensor) -> None:
+        v = v.to(device=self._device, dtype=self._dtype)
+        if self._velocity_max is not None:
+            vmax = float(self._velocity_max)
+            speeds = torch.linalg.norm(v, dim=1)
+            mask = speeds > vmax
+            if torch.any(mask):
+                scale = (vmax / speeds.clamp(min=1e-12))
+                v = v * torch.where(mask, scale, torch.ones_like(scale)).unsqueeze(1)
+        self._vel_cmds = v
+
+
+    @staticmethod
+    def _planar_axes(positions: torch.Tensor, planar_std_threshold: float) -> Tuple[bool, Optional[Tuple[int, int]], Optional[int]]:
+        # positions: (N,3)
+        std = torch.std(positions, dim=0)
+        planar = bool(torch.any(std <= planar_std_threshold).item())
+        if not planar:
+            return False, None, None
+        order = torch.argsort(std)  # small->large
+        dropped = int(order[0].item())
+        axes = (int(order[1].item()), int(order[2].item()))
+        return True, axes, dropped
+
+
+    def _knn_interp_phi(
+        self,
+        query: torch.Tensor,       # (Q,D)
+        sites: torch.Tensor,       # (N,D)
+        values: torch.Tensor,      # (N,)
+        *,
+        k: int,
+        eps: float,
+        p: float,
+    ) -> torch.Tensor:
+        # distances (Q,N)
+        d2 = torch.cdist(query, sites, p=2.0)  # (Q,N)
+        kk = min(int(k), int(sites.shape[0]))
+        dist, idx = torch.topk(d2, k=kk, dim=1, largest=False)  # (Q,kk)
+        v = values[idx]  # (Q,kk)
+
+        w = 1.0 / (dist.clamp(min=eps) ** p)
+        wsum = torch.sum(w, dim=1).clamp(min=eps)
+        return torch.sum(w * v, dim=1) / wsum  # (Q,)
+
+    def _kde_rho_grad(
+        self,
+        positions_prev: torch.Tensor,  # (N,3)
+        planar: bool,
+        axes_2d: Optional[Tuple[int, int]],
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if self._cbf is None:
+            raise RuntimeError("cbf_config is None.")
+
+        bw = float(self._cbf.kde_bandwidth)
+        R = float(self._cbf.interaction_radius)
+
+        X = positions_prev  # (N,3)
+        N = X.shape[0]
+
+        if planar:
+            if axes_2d is None:
+                raise ValueError("planar=True requires axes_2d.")
+            ax0, ax1 = int(axes_2d[0]), int(axes_2d[1])
+            X2 = X[:, (ax0, ax1)]  # (N,2)
+
+            diffs = X2.unsqueeze(1) - X2.unsqueeze(0)  # (N,N,2)
+            d2 = torch.sum(diffs * diffs, dim=2)       # (N,N)
+            d = torch.sqrt(d2)
+
+            neigh = (d <= R) & (d > 0.0)
+            w = torch.exp(-d2 / (2.0 * bw * bw)) * neigh.to(X.dtype)
+
+            # truncated normalization like your planar version
+            C = 2.0 * math.pi * bw**2 * (1.0 - math.exp(-0.5))
+            rho = torch.sum(w, dim=1) / (float(N) * C)
+
+            grad2 = -(1.0 / (float(N) * C * (bw**2))) * torch.sum(diffs * w.unsqueeze(2), dim=1)
+            grad = torch.zeros((N, 3), device=X.device, dtype=X.dtype)
+            grad[:, ax0] = grad2[:, 0]
+            grad[:, ax1] = grad2[:, 1]
+            return rho, grad
+
+        diffs = X.unsqueeze(1) - X.unsqueeze(0)  # (N,N,3)
+        d2 = torch.sum(diffs * diffs, dim=2)     # (N,N)
+        d = torch.sqrt(d2)
+
+        neigh = (d <= R) & (d > 0.0)
+        w = torch.exp(-d2 / (2.0 * bw * bw)) * neigh.to(X.dtype)
+
+        C = (2.0 * math.pi) ** 1.5 * (bw ** 3)
+        rho = torch.sum(w, dim=1) / (float(N) * C)
+        grad = -(1.0 / (float(N) * C * (bw**2))) * torch.sum(diffs * w.unsqueeze(2), dim=1)
+        return rho, grad
+
+
+    def _cbf_project(
+        self,
+        v_nom: torch.Tensor,  # (N,3)
+        rho: torch.Tensor,    # (N,)
+        grad: torch.Tensor,   # (N,3)
+    ) -> torch.Tensor:
+        if self._cbf is None:
+            raise RuntimeError("cbf_config is None.")
+
+        v = v_nom.clone()
+
+        rho_dot_min = float(self._cbf.density_upper_gain) * (rho - float(self._cbf.density_upper_bound))
+        rho_dot_max = float(self._cbf.density_lower_gain) * (rho - float(self._cbf.density_lower_bound))
+
+        grad_norm = torch.linalg.norm(grad, dim=1)
+        active = grad_norm > float(self._cbf.grad_norm_eps)
+
+        grad_sq = torch.sum(grad * grad, dim=1).clamp(min=1e-12)
+        rho_dot = torch.sum(grad * v, dim=1)
+
+        need = active & (rho_dot < rho_dot_min)
+        if torch.any(need):
+            alpha = (rho_dot_min - rho_dot) / grad_sq
+            v = v + (alpha.unsqueeze(1) * grad) * need.to(v.dtype).unsqueeze(1)
+            rho_dot = torch.sum(grad * v, dim=1)
+
+        need = active & (rho_dot > rho_dot_max)
+        if torch.any(need):
+            alpha = (rho_dot_max - rho_dot) / grad_sq
+            v = v + (alpha.unsqueeze(1) * grad) * need.to(v.dtype).unsqueeze(1)
+
+        # unit speed saturation (same spirit as your DCC CBF projection)
+        n = torch.linalg.norm(v, dim=1).clamp(min=1e-12)
+        mask = n > 1.0
+        if torch.any(mask):
+            v = v / n.unsqueeze(1)
+        return v
+
+
+    def step(self, cur_time: float, states: List[Dict[str, Any]]) -> None:
+        if len(states) != self._num_vehicles:
+            raise ValueError(f"states must have length {self._num_vehicles}, got {len(states)}")
+
+        if self._last_time is None:
+            self._last_time = float(cur_time)
+            self._set_vel_cmds(torch.zeros((self._num_vehicles, 3), device=self._device, dtype=self._dtype))
+            return
+
+        dt = float(cur_time) - float(self._last_time)
+        self._last_time = float(cur_time)
+        if (not math.isfinite(dt)) or dt <= 0.0:
+            self._set_vel_cmds(torch.zeros((self._num_vehicles, 3), device=self._device, dtype=self._dtype))
+            return
+
+        # positions (N,3) torch
+        pos = torch.zeros((self._num_vehicles, 3), device=self._device, dtype=self._dtype)
+        for i, s in enumerate(states):
+            pos[i, :] = torch.as_tensor(s["x"], device=self._device, dtype=self._dtype).reshape(3,)
+
+        if self._positions_prev_cbf is None:
+            self._positions_prev_cbf = pos.clone()
+
+        planar, axes_2d, dropped_axis = self._planar_axes(pos, float(self._doot.planar_std_threshold))
+        if planar:
+            assert axes_2d is not None
+            pos_eval = pos[:, axes_2d]                    # (N,2)
+            targ_eval = self._targeted_positions[:, axes_2d]  # (M,2)
+        else:
+            pos_eval = pos
+            targ_eval = self._targeted_positions
+
+        # (1) count: for each target, nearest agent
+        # d2: (M,N)
+        d2 = torch.cdist(targ_eval, pos_eval, p=2.0)  # (M,N) distances
+        nearest = torch.argmin(d2, dim=1)             # (M,)
+        count = torch.bincount(nearest, minlength=self._num_vehicles).to(self._dtype)
+        count = count / float(targ_eval.shape[0])
+
+        # (2) Laplacian from undirected kNN graph
+        n_neigh = int(self._doot.num_neighbors)
+        if n_neigh < 2:
+            raise ValueError("doot_config.num_neighbors must be >= 2")
+
+        # pairwise distances between agents (N,N)
+        dAA = torch.cdist(pos_eval, pos_eval, p=2.0)  # (N,N)
+        # exclude self by setting diag to +inf, then take smallest
+        inf = torch.tensor(float("inf"), device=self._device, dtype=self._dtype)
+        dAA = dAA + torch.diag(inf.repeat(self._num_vehicles))
+        k = min(self._num_vehicles - 1, n_neigh - 1)
+        _, nn_idx = torch.topk(dAA, k=k, dim=1, largest=False)  # (N,k)
+
+        A_dir = torch.zeros((self._num_vehicles, self._num_vehicles), device=self._device, dtype=self._dtype)
+        rows = torch.arange(self._num_vehicles, device=self._device).repeat_interleave(k)
+        cols = nn_idx.reshape(-1)
+        A_dir[rows, cols] = 1.0
+
+        W = 0.5 * (A_dir + A_dir.t())
+        A = (W > 0.0).to(self._dtype)
+        deg = torch.diag(torch.sum(A, dim=1))
+        L = deg - A
+
+        # (3) primal-dual iterations
+        normalization = 1.0 / float(self._num_vehicles)
+        gain = 1.0 / float(n_neigh + 1)
+
+        phi = self._phi
+        ones = torch.ones((self._num_vehicles,), device=self._device, dtype=self._dtype)
+        for _ in range(int(self._doot.max_iter_primaldual)):
+            phi = phi - gain * (L @ phi) + normalization * ones - count
+        self._phi = phi
+
+        # (4) trial moves (generate on CPU for RNG, then move to device)
+        S = int(self._doot.num_trial_move_samples)
+        disp_cpu = torch.normal(
+            mean=self._mean.expand(S, 3),
+            std=torch.sqrt(self._var).expand(S, 3),
+            generator=self._rng,
+        )  # (S,3) on CPU
+        disp = disp_cpu.to(device=self._device, dtype=self._dtype)
+
+        if planar and dropped_axis is not None:
+            disp[:, dropped_axis] = 0.0
+
+        norms = torch.linalg.norm(disp, dim=1)  # (S,)
+        keep = norms >= float(self._doot.min_displacement_norm)
+        if not torch.any(keep):
+            self._set_vel_cmds(torch.zeros((self._num_vehicles, 3), device=self._device, dtype=self._dtype))
+            self._positions_prev_cbf = pos.clone()
+            return
+
+        disp = disp[keep]
+        norms = norms[keep]
+        K = int(disp.shape[0])
+
+        # (5) evaluate phi at all trials for all agents using torch kNN interpolant
+        # build all trial positions: (N,K,3)
+        pos_trial = pos.unsqueeze(1) + disp.unsqueeze(0)   # (N,K,3)
+        if planar:
+            assert axes_2d is not None
+            query = pos_trial[:, :, axes_2d].reshape(-1, 2)   # (N*K,2)
+            sites = pos_eval                                 # (N,2)
+        else:
+            query = pos_trial.reshape(-1, 3)                  # (N*K,3)
+            sites = pos_eval                                  # (N,3)
+
+        phi_q = self._knn_interp_phi(
+            query=query,
+            sites=sites,
+            values=self._phi,
+            k=int(self._doot.num_neighbors),
+            eps=1e-6,
+            p=2.0,
+        ).reshape(self._num_vehicles, K)  # (N,K)
+
+        cost = norms.unsqueeze(0) + phi_q  # (N,K)
+        idx = torch.argmin(cost, dim=1)    # (N,)
+
+        best_disp = disp[idx]              # (N,3)
+        v_nom = best_disp / float(dt)      # (N,3)
+
+        # (6) optional CBF in torch
+        if not self._apply_cbf:
+            self._set_vel_cmds(v_nom)
+            self._positions_prev_cbf = pos.clone()
+            return
+
+        rho, grad = self._kde_rho_grad(self._positions_prev_cbf, planar=planar, axes_2d=axes_2d)
+        v = self._cbf_project(v_nom, rho, grad)
+
+        self._set_vel_cmds(v)
+        self._positions_prev_cbf = pos.clone()

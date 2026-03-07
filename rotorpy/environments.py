@@ -1,12 +1,15 @@
+import os
 import numpy as np
+import torch
 from scipy.spatial.transform import Rotation
 import matplotlib.pyplot as plt
 import time as clk
-from rotorpy.simulate import simulate, simulate_swarm
+from rotorpy.simulate import simulate, simulate_batch
 from rotorpy.utils.plotter import *
 from rotorpy.world import World
 from rotorpy.utils.postprocessing import unpack_sim_data
-import os
+from typing import Callable, List, Optional, Dict, Any, Union
+
 
 @staticmethod
 def check_len(name, lst, standard):
@@ -248,299 +251,253 @@ class Environment():
 
 ######## ENVIRONMENT FOR A SWARM OF VEHICLES ########
 
-class EnvironmentSwarm():
+class EnvironmentBatch:
     """
-    Sandbox represents an instance of the simulation environment containing a swarm of vehicles,
-    controller, trajectory generator, wind profile.
+    Batched simulation environment.
+
+    Assumption:
+      - All simulation states are torch tensors in a single batch.
+      - vehicles/controllers/trajectories are batched objects.
+      - coordinators can be None; if provided, they are batched coordinators.
+
     """
+
     def __init__(
         self,
-        vehicles,
-        controllers,
-        trajectories,
-        coordinators,
-        imus = None,
-        mocaps = None,
-        estimators = None,
-        world = None,
-        wind_profile = None,
-        sim_rate = 100,
-        safety_margin = 0.25,
-    ):
+        vehicles,                 # BatchedMultirotor
+        controllers,              # BatchedSE3Control
+        trajectories,             # BatchedVelocityReference (push-based)
+        coordinators: Optional[List[Any]] = None,
+        imus=None,                # BatchedIMU or None
+        mocaps=None,              # BatchedMotionCapture or None
+        estimators=None,          # BatchedEstimator or None
+        world=None,
+        wind_profile=None,        # Batched wind or None
+        sim_rate: int = 100,
+        safety_margin: float = 0.25,
+    ) -> None:
 
-        """
-        Initialize batched simulation environment.
-
-        Parameters
-        ----------
-        vehicles : sequence
-            Collection of vehicle objects to be simulated.
-
-        controllers : sequence
-            Collection of controller objects corresponding to each vehicle.
-
-        trajectories : sequence
-            Collection of trajectory objects for each vehicle.
-
-        coordinators : sequence
-            Collection of coordinator objects (e.g., swarm-level logic).
-
-        imus : sequence or None, optional
-            IMU sensor objects for each vehicle. If None, default IMU
-            instances are created.
-
-        mocaps : sequence or None, optional
-            Motion capture sensor objects for each vehicle. If None,
-            default mocap instances are created.
-
-        estimators : sequence or None, optional
-            State estimator objects for each vehicle. If None, no estimator
-            is used unless internally instantiated.
-
-        world : World or None, optional
-            World/environment object defining bounds and obstacles.
-
-        wind_profile : WindProfile or None, optional
-            Wind profile object. If None, no wind is applied.
-
-        sim_rate : int, default=100
-            Simulation update frequency in Hz.
-
-        safety_margin : float, default=0.25
-            Radius of safety region around each vehicle.
-        """
-
-        #  Check that all input lists have the same length
-        names = [
-            "vehicles",
-            "controllers",
-            "trajectories",
-        ]
-
-        lists = [
-            vehicles,
-            controllers,
-            trajectories,
-        ]
-
-        sizes = {name: len(lst) for name, lst in zip(names, lists)}
-        expected = sizes["vehicles"]
-
-        mismatch = {k: v for k, v in sizes.items() if v != expected}
-
-        if mismatch:
-            raise ValueError(
-                f"EnvironmentSwarm(): inconsistent list sizes. "
-                f"Expected {expected}. Got {mismatch}"
-            )
-
-        # Verify the number of coordinators
-        if len(coordinators) == 0:
-            raise ValueError("EnvironmentSwarm(): coordinators cannot be empty")
-
-        # Set the common variable
-        num_vehicles = len(vehicles)
-
-        # Initialize the member variables
         self.vehicles = vehicles
         self.controllers = controllers
         self.trajectories = trajectories
-        self.coordinators = coordinators
-        self.safety_margin = safety_margin
-        self.sim_rate = sim_rate
-        self.imus = []
-        self.mocaps = []
-        self.estimators = []
 
+        # coordinators can be None
+        self.coordinators = coordinators
+
+        self.safety_margin = float(safety_margin)
+        self.sim_rate = int(sim_rate)
+
+        # World
         if world is None:
-            # If no world is specified, assume that it means that the intended world is free space.
             wbound = 3
-            self.world = World.empty((-wbound, wbound, -wbound,
-                                       wbound, -wbound, wbound))
+            self.world = World.empty((-wbound, wbound, -wbound, wbound, -wbound, wbound))
         else:
             self.world = world
 
+        # Wind (batched)
         if wind_profile is None:
-            # If wind is not specified, default to no wind.
-            from rotorpy.wind.default_winds import NoWind
-            self.wind_profile = NoWind()
+            from rotorpy.wind.default_winds import BatchedNoWind
+            self.wind_profile = BatchedNoWind(self.vehicles.num_drones)
         else:
             self.wind_profile = wind_profile
 
-        # In the event of no specified IMU, default to 0 bias with white noise with default parameters as specified below.
+        # IMU (batched)
         if imus is None:
-            from rotorpy.sensors.imu import Imu
-            for idx in range(num_vehicles):
-                self.imus.append(Imu(p_BS = np.zeros(3,), R_BS = np.eye(3), sampling_rate=sim_rate))
+            from rotorpy.sensors.imu import BatchedImu
+            self.imus = BatchedImu(
+                num_drones=self.vehicles.num_drones,
+                sampling_rate=self.sim_rate
+            )
         else:
-            check_len("imus", imus, num_vehicles)
             self.imus = imus
 
+        # Mocap (batched)
         if mocaps is None:
-            # If no mocap is specified, set a default mocap.
-            # Default motion capture properties. Pretty much made up based on qualitative comparison with real data from Vicon.
-            mocap_params = {'pos_noise_density': 0.0005*np.ones((3,)),  # noise density for position
-                    'vel_noise_density': 0.0010*np.ones((3,)),          # noise density for velocity
-                    'att_noise_density': 0.0005*np.ones((3,)),          # noise density for attitude
-                    'rate_noise_density': 0.0005*np.ones((3,)),         # noise density for body rates
-                    'vel_artifact_max': 5,                              # maximum magnitude of the artifact in velocity (m/s)
-                    'vel_artifact_prob': 0.001,                         # probability that an artifact will occur for a given velocity measurement
-                    'rate_artifact_max': 1,                             # maximum magnitude of the artifact in body rates (rad/s)
-                    'rate_artifact_prob': 0.0002                        # probability that an artifact will occur for a given rate measurement
-            }
-            from rotorpy.sensors.external_mocap import MotionCapture
+            from rotorpy.sensors.external_mocap import BatchedMotionCapture
 
-            for idx in range(num_vehicles):
-                self.mocaps.append(MotionCapture(sampling_rate=sim_rate, mocap_params=mocap_params, with_artifacts=False))
+            mocap_params = {
+                'pos_noise_density': 0.0005 * np.ones((3,)),
+                'vel_noise_density': 0.0010 * np.ones((3,)),
+                'att_noise_density': 0.0005 * np.ones((3,)),
+                'rate_noise_density': 0.0005 * np.ones((3,)),
+                'vel_artifact_max': 5,
+                'vel_artifact_prob': 0.001,
+                'rate_artifact_max': 1,
+                'rate_artifact_prob': 0.0002
+            }
+
+            self.mocaps = BatchedMotionCapture(
+                num_drones=self.vehicles.num_drones,
+                sampling_rate=self.sim_rate,
+                mocap_params=mocap_params,
+                with_artifacts=False
+            )
         else:
-            check_len("mocaps", mocaps, num_vehicles)
             self.mocaps = mocaps
 
+        # Estimator (batched)
         if estimators is None:
-            # In the likely case where an estimator is not supplied, default to the null state estimator.
-            from rotorpy.estimators.nullestimator import NullEstimator
-            for idx in range(num_vehicles):
-                self.estimators.append(NullEstimator())
+            from rotorpy.estimators.nullestimator import BatchedNullEstimator
+            self.estimators = BatchedNullEstimator(self.vehicles.num_drones)
         else:
-            check_len("estimators", estimators, num_vehicles)
             self.estimators = estimators
 
-        return
+        self.initial_states: Optional[Dict[str, torch.Tensor]] = None
+        self.result = None
 
+    def set_init(self, initial_states: Dict[str, torch.Tensor]) -> None:
+        """
+        initial_states must be a dict of torch tensors with batch dimension B.
+        """
+        if not isinstance(initial_states, dict):
+            raise ValueError("EnvironmentBatch.set_init(): initial_states must be a dict of torch tensors.")
 
-    def set_init(self, initial_states):
-        if len(self.vehicles) != len(initial_states):
+        # Minimal validation: must contain 'x' with shape (B,3)
+        if "x" not in initial_states or (not torch.is_tensor(initial_states["x"])):
+            raise ValueError("EnvironmentBatch.set_init(): initial_states must include tensor 'x'.")
+
+        B = self.vehicles.num_drones
+        if initial_states["x"].shape[0] != B:
             raise ValueError(
-                f"EnvironmentSwarm::set_init(): inconsistent initial_states sizes. "
-                f"Expected {len(self.vehicles)}. Got {len(initial_states)}"
+                f"EnvironmentBatch.set_init(): batch size mismatch. vehicles.num_drones={B}, "
+                f"initial_states['x'].shape[0]={initial_states['x'].shape[0]}"
             )
-        for idx in range(len(initial_states)):
-            self.vehicles[idx].initial_state = initial_states[idx]
+
         self.initial_states = initial_states
 
 
-    def run(self,
-            t_final=10,
-            use_mocap=False,
-            terminates=False,
-            animate_bool=False,
-            animate_wind=False,
-            verbose=False,
-            fname=None):
+    def run(
+        self,
+        t_final: Union[float, np.ndarray, List[float]] = 10.0,
+        use_mocap: bool = False,
+        terminate=None,
+        start_times=None,
+        animate_bool: bool = False,
+        animate_wind: bool = False,
+        verbose: bool = False,
+        fname: Optional[str] = None,
+        print_fps: bool = False,
+    ):
         """
-        Run the swarm simulator and (optionally) animate all vehicles on the same axes.
+        Run batched simulator.
         """
+        if self.initial_states is None:
+            raise RuntimeError("EnvironmentBatch.run(): call set_init(...) before run().")
 
-        self.t_step = 1.0 / self.sim_rate
+        self.t_step = 1.0 / float(self.sim_rate)
         self.t_final = t_final
-        self.use_mocap = use_mocap
-
-        # terminates must be per-vehicle list for simulate_swarm
-        if isinstance(terminates, list):
-            self.terminates = terminates
-        else:
-            self.terminates = [terminates for _ in range(len(self.vehicles))]
+        self.use_mocap = bool(use_mocap)
 
         start_time = clk.time()
 
-        (times,
-        states,
-        controls,
-        flats,
-        imu_measurements,
-        imu_gts,
-        mocap_measurements,
-        state_estimates,
-        exits) = simulate_swarm(
-            self.world,
-            self.wind_profile,
-            self.initial_states,
-            self.vehicles,
-            self.controllers,
-            self.trajectories,
-            self.imus,
-            self.mocaps,
-            self.estimators,
-            self.terminates,
-            self.coordinators,
-            self.t_final,
-            self.t_step,
-            self.safety_margin,
-            self.use_mocap
+        (
+            times,
+            states,
+            controls,
+            flats,
+            imu_measurements,
+            imu_gts,
+            mocap_measurements,
+            state_estimates,
+            exit_status,
+            exit_timesteps,
+        ) = simulate_batch(
+            world=self.world,
+            initial_states=self.initial_states,
+            vehicles=self.vehicles,
+            controller=self.controllers,
+            trajectories=self.trajectories,
+            wind_profile=self.wind_profile,
+            imu=self.imus,
+            mocap=self.mocaps,
+            estimator=self.estimators,
+            t_final=self.t_final,
+            t_step=self.t_step,
+            safety_margin=self.safety_margin,
+            use_mocap=self.use_mocap,
+            coordinators=self.coordinators,   # None is allowed
+            terminate=terminate,
+            start_times=start_times,
+            print_fps=print_fps,
         )
 
         if verbose:
             wall = clk.time() - start_time
-            last_times = [t[-1] if len(t) else None for t in times]
+            # times is (T,B) numpy array after packing
+            last_times = times[-1, :]
             print('-------------------RESULTS-----------------------')
-            print(f"SIM T_FINAL -- {self.t_final:3.2f} s | WALL TIME -- {wall:3.2f} s")
-            print(f"LAST SIM TIMES (per vehicle) -- {last_times}")
-            print(f"EXIT STATUSES (per vehicle) -- {[e.value if e is not None else None for e in exits]}")
+            print(f"SIM T_FINAL -- {self.t_final} | WALL TIME -- {wall:3.2f} s")
+            print(f"LAST SIM TIMES (per drone) -- {last_times}")
+            print(f"EXIT STATUSES (per drone) -- {[e.value if e is not None else None for e in exit_status]}")
 
-        # Save raw swarm result
+        # Save raw result
         self.result = dict(
-            time=times,
-            state=states,
+            time=times,                     # (T,B) numpy
+            state=states,                   # dict with arrays (T,B,...)
             control=controls,
             flat=flats,
             imu_measurements=imu_measurements,
             imu_gt=imu_gts,
             mocap_measurements=mocap_measurements,
             state_estimate=state_estimates,
-            exits=exits,
+            exits=exit_status,
+            exit_timesteps=exit_timesteps,
         )
 
-        # ---- Build arrays for animate() ----
-        # Use a common time base. Since each vehicle may terminate early, truncate to the shortest.
-        lengths = [len(t) for t in times]
-        N = min(lengths)
-        if N == 0:
-            raise RuntimeError("run(): no samples produced (all time histories empty).")
-
-        # Assume all vehicles share same dt; take vehicle 0's time truncated.
-        time_anim = times[0][:N]
-
-        # Stack position/wind/rotation into (N, M, ...)
-        M = len(states)
-        pos = np.stack([states[i]['x'][:N] for i in range(M)], axis=1)        # (N, M, 3)
-        wind = np.stack([states[i]['wind'][:N] for i in range(M)], axis=1)    # (N, M, 3)
-        rot = np.stack([Rotation.from_quat(states[i]['q'][:N]).as_matrix()
-                        for i in range(M)], axis=1)                           # (N, M, 3, 3)
-
         # ---- Animate ----
-        if fname is not None:
-            if fname.endswith(".gif"):
-                fname = fname[:-4]
-            elif fname.endswith(".mp4"):
-                fname = fname[:-4]
-
+        # Your merged outputs are (T,B,...) already. No per-vehicle list stacking required.
         if animate_bool:
-            # keep reference to prevent garbage collection
-            self.ani = animate(time_anim, pos, rot, wind,
-                            animate_wind=animate_wind,
-                            world=self.world,
-                            filename=fname)
+            # Determine valid horizon: use minimum exit timestep if present, else full
+            T = times.shape[0]
+            if exit_timesteps is not None and np.any(exit_timesteps > 0):
+                N = int(np.min(exit_timesteps[exit_timesteps > 0]))
+                N = max(1, min(N, T))
+            else:
+                N = T
+
+            time_anim = times[:N, 0]  # use drone 0 time (common dt)
+
+            pos = states['x'][:N, :, :]         # (N,B,3)
+            wind = states['wind'][:N, :, :]     # (N,B,3)
+            # rot from quaternions (N,B,4) -> (N,B,3,3)
+            rot = np.stack(
+                [Rotation.from_quat(states['q'][:N, b, :]).as_matrix() for b in range(pos.shape[1])],
+                axis=1
+            )
+
+            if fname is not None:
+                if fname.endswith(".gif"):
+                    fname = fname[:-4]
+                elif fname.endswith(".mp4"):
+                    fname = fname[:-4]
+
+            self.ani = animate(
+                time_anim,
+                pos,
+                rot,
+                wind,
+                animate_wind=animate_wind,
+                world=self.world,
+                filename=fname,
+            )
             plt.show()
 
         return self.result
 
 
-    def save_to_csv(self, savepath=None):
-        """
-        Save the simulation data in self.results to a file.
-        """
-
+    def save_to_csv(self, savepath: Optional[str] = None) -> None:
         if savepath is None:
             savepath = "rotorpy_simulation_results.csv"
 
         if self.result is None:
             print("Error: cannot save if no results have been generated! Aborting save.")
             return
-        else:
-            if not ".csv" in savepath:
-                savepath = savepath + ".csv"
-            dataframe = unpack_sim_data(self.result)
-            dataframe.to_csv(savepath)
+
+        if ".csv" not in savepath:
+            savepath = savepath + ".csv"
+
+        dataframe = unpack_sim_data(self.result)
+        dataframe.to_csv(savepath)
 
 
 ######## Unit test code for environments.py ########

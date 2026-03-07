@@ -3,32 +3,32 @@ basic_usage_swarm.py
 Test script for DOOT coordinator with RotorPy swarm simulation.
 """
 
-# ===================== Imports =====================
 
 import os
-import numpy as np
 import argparse
+import numpy as np
+import torch
 
-from rotorpy.environments import EnvironmentSwarm
+from rotorpy.environments import EnvironmentBatch
 from rotorpy.world import World
 
-from rotorpy.vehicles.multirotor import Multirotor
+from rotorpy.vehicles.multirotor import BatchedMultirotorParams, BatchedMultirotor
 from rotorpy.vehicles.crazyflie_params import quad_params
+from rotorpy.controllers.quadrotor_control import BatchedSE3Control
+from rotorpy.trajectories.velocity_reference import BatchedVelocityReference
 
-from rotorpy.controllers.quadrotor_control import SE3Control
-from rotorpy.trajectories.velocity_reference import VelocityReference
+from rotorpy.wind.default_winds import BatchedNoWind
+from rotorpy.sensors.imu import BatchedImu
+from rotorpy.sensors.external_mocap import BatchedMotionCapture
+from rotorpy.estimators.wind_ekf import BatchedWindEKF
 
-from rotorpy.wind.default_winds import SinusoidWind
-
-# Coordinator
 from rotorpy.coordinators.doot_cbf_coordinator import (
-    DootCbfCoordinator,
+    BatchedDootCbfCoordinator,
     DootConfig,
 )
 
-# ===================== Helpers =====================
 
-def _get_world_extents(world_obj) -> np.ndarray:
+def get_world_extents(world_obj) -> np.ndarray:
     """
     Return extents as np.array([xmin, xmax, ymin, ymax, zmin, zmax], dtype=float).
 
@@ -57,7 +57,7 @@ def _get_world_extents(world_obj) -> np.ndarray:
     )
 
 
-def _rejection_sample_xy(
+def rejection_sample_xy(
     rng: np.random.Generator,
     num: int,
     mean_xy: np.ndarray,
@@ -86,7 +86,7 @@ def _rejection_sample_xy(
     return out[:num, :]
 
 
-def _sample_gmm_targets_xy_in_bounds(
+def sample_gmm_targets_xy_in_bounds(
     rng: np.random.Generator,
     num_samples: int,
     num_gmm_components: int,
@@ -127,63 +127,83 @@ def _sample_gmm_targets_xy_in_bounds(
     return out[:num_samples, :]
 
 
-########## 2D visualization helper ##########
+def convert_params_to_batched(all_params, device='cpu'):
+    num_drones = len(all_params)
 
-def _write_basic_usage_swarm_2d_video(results, vis_output_name,
-                                      x_min, x_max, y_min, y_max,
-                                      num_vehicles, samples_xy, rng):
+    # 1. Extract physical parameters into (N, 1) tensors
+    # We use a list comprehension to pull the values from your list of dicts
+    mass_list = [[d['mass']] for d in all_params]
+    cdx_list  = [[d['c_Dx']] for d in all_params]
+    cdy_list  = [[d['c_Dy']] for d in all_params]
+    cdz_list  = [[d['c_Dz']] for d in all_params]
+
+    # 2. Setup the output dictionary
+    quad_params = {
+        'mass': torch.tensor(mass_list, device=device).double(),
+        'c_Dx': torch.tensor(cdx_list, device=device).double(),
+        'c_Dy': torch.tensor(cdy_list, device=device).double(),
+        'c_Dz': torch.tensor(cdz_list, device=device).double(),
+    }
+
+    # 3. Add Filter Defaults (These are not in all_quad_params)
+    # Initial state (N, 9) - Starting level with near-zero velocity
+    quad_params['xhat0'] = torch.zeros((num_drones, 9), device=device).double()
+    quad_params['xhat0'][:, 3:6] = 0.01 # Prevent singularity in Jacobian
+
+    # Initial Covariance (N, 9, 9)
+    quad_params['P0'] = torch.eye(9, device=device).double().repeat(num_drones, 1, 1)
+
+    # Process Noise (N, 9, 9)
+    quad_params['Q'] = torch.eye(9, device=device).double().repeat(num_drones, 1, 1) * 0.1
+
+    # Measurement Noise (N, 9, 9)
+    quad_params['R'] = torch.eye(9, device=device).double().repeat(num_drones, 1, 1) * 0.01
+
+    return quad_params
+
+
+def write_basic_usage_swarm_2d_video(
+    results,
+    vis_output_name,
+    x_min, x_max, y_min, y_max,
+    num_vehicles,
+    samples_xy,
+    rng,
+):
     """
-    Generate a 2D AVI video visualizing:
-      - analytic GMM target PDF
-      - target samples (faint points)
-      - vehicle trajectories frame-by-frame
-
-    Output:
-      basic_usage_swarm_2d.avi (same directory as this script)
-
-    Assumes the following variables exist in scope:
-      - mean_des, var_des, num_gmm_components
-      - samples_xy
-      - num_vehicles
-      - rng
-      - x_min, x_max, y_min, y_max
+    Batched results format:
+      results["state"]["x"] : (T, B, 3) numpy
     """
-
     import os
     import cv2
     import numpy as np
     import matplotlib.pyplot as plt
-    from scipy.stats import multivariate_normal
 
     # ===================== Output path =====================
-
     out_dir = os.path.dirname(os.path.abspath(__file__))
     avi_path = os.path.join(out_dir, vis_output_name)
 
     # ===================== Visualization bounds =====================
-
     vis_pad = 0.5
     vis_x_min, vis_x_max = x_min - vis_pad, x_max + vis_pad
     vis_y_min, vis_y_max = y_min - vis_pad, y_max + vis_pad
 
     # ===================== Extract trajectories =====================
+    X = np.asarray(results["state"]["x"], dtype=float)  # (T,B,3)
+    T, B, _ = X.shape
+    if num_vehicles != B:
+        # Keep behavior deterministic and explicit
+        raise ValueError(f"num_vehicles={num_vehicles} but results has B={B} vehicles.")
 
-    traj_xy = []
-    traj_len = []
-    for i in range(num_vehicles):
-        xy = np.asarray(results["state"][i]["x"], dtype=float)[:, :2]
-        traj_xy.append(xy)
-        traj_len.append(xy.shape[0])
+    traj_xy = X[:, :, :2]  # (T,B,2)
+    num_frames = T
 
-    num_frames = int(max(traj_len))
-    print(f"[basic_usage_swarm] traj lengths: min={min(traj_len)}, max={max(traj_len)}")
+    print(f"[basic_usage_swarm] batched traj: T={T}, B={B}")
 
     # Pre-allocate offsets with NaNs (NaN points are not rendered by Matplotlib scatter)
-    offsets = np.full((num_vehicles, 2), np.nan, dtype=float)
-
+    offsets = np.full((B, 2), np.nan, dtype=float)
 
     # ===================== Matplotlib setup =====================
-
     fig, ax = plt.subplots(figsize=(6, 6))
     ax.set_aspect("equal")
     ax.set_xlim(vis_x_min, vis_x_max)
@@ -193,43 +213,33 @@ def _write_basic_usage_swarm_2d_video(results, vis_output_name,
     ax.grid(True)
 
     # Target samples
-    ax.scatter(
-        samples_xy[:, 0],
-        samples_xy[:, 1],
-        s=60, # sample radius
-        c="k",
-        alpha=0.45,
-        marker="^",
-        linewidths=0,
-    )
+    if samples_xy is not None and len(samples_xy) > 0:
+        ax.scatter(
+            samples_xy[:, 0],
+            samples_xy[:, 1],
+            s=60,  # sample radius
+            c="k",
+            alpha=0.45,
+            marker="^",
+            linewidths=0,
+        )
 
-    # Initial vehicle positions
-    XY0 = np.stack(
-        [np.asarray(results["state"][i]["x"])[0, :2] for i in range(num_vehicles)],
-        axis=0,
-    )
+    # Initial vehicle positions (k=0)
+    XY0 = traj_xy[0, :, :]  # (B,2)
 
-    colors = rng.random((num_vehicles, 3))
+    colors = rng.random((B, 3))
     scat = ax.scatter(XY0[:, 0], XY0[:, 1], s=20, c=colors)
 
     fig.canvas.draw()
 
     # ===================== OpenCV writer =====================
-
     width, height = fig.canvas.get_width_height()
     fourcc = cv2.VideoWriter_fourcc(*"XVID")
     video = cv2.VideoWriter(avi_path, fourcc, 60, (width, height))
 
     # ===================== Frame loop =====================
-
     for k in range(num_frames):
-        # fill offsets for vehicles that have this frame
-        for i in range(num_vehicles):
-            if k < traj_len[i]:
-                offsets[i, :] = traj_xy[i][k]
-            else:
-                offsets[i, :] = np.nan  # hide vehicle i at this frame
-
+        offsets[:, :] = traj_xy[k, :, :]  # (B,2)
         scat.set_offsets(offsets)
         ax.set_title(f"frame {k}/{num_frames-1}")
 
@@ -238,9 +248,7 @@ def _write_basic_usage_swarm_2d_video(results, vis_output_name,
         buf = np.frombuffer(fig.canvas.tostring_argb(), dtype=np.uint8)
         buf = buf.reshape(height, width, 4)
         frame = buf[:, :, [3, 2, 1]]  # ARGB → BGR
-
         video.write(frame)
-
 
     video.release()
     plt.close(fig)
@@ -248,9 +256,7 @@ def _write_basic_usage_swarm_2d_video(results, vis_output_name,
     print(f"[basic_usage_swarm] Video written to: {avi_path}")
 
 
-########## 3D visualization helper ##########
-
-def _write_basic_usage_swarm_3d_video(
+def write_basic_usage_swarm_3d_video(
     results,
     vis_output_name_3d,
     x_min, x_max, y_min, y_max, z_min, z_max,
@@ -262,15 +268,8 @@ def _write_basic_usage_swarm_3d_video(
     fps: int = 60,
 ):
     """
-    Generate a true 3D AVI video visualizing:
-      - target samples as points on z=0 plane
-      - vehicle trajectories frame-by-frame in 3D
-
-    Uses Matplotlib mplot3d and writes frames via OpenCV VideoWriter.
-
-    Args:
-      elev, azim: Matplotlib 3D camera view angles (degrees)
-      fps: output video FPS
+    Batched results format:
+      results["state"]["x"] : (T, B, 3) numpy
     """
     import os
     import cv2
@@ -288,26 +287,20 @@ def _write_basic_usage_swarm_3d_video(
     vis_y_min, vis_y_max = y_min - vis_pad, y_max + vis_pad
     vis_z_min, vis_z_max = z_min - vis_pad, z_max + vis_pad
 
-    # If your z range is tight or fixed at 0, keep it viewable:
     if abs(vis_z_max - vis_z_min) < 1e-6:
         vis_z_min -= 1.0
         vis_z_max += 1.0
 
     # ===================== Extract trajectories =====================
-    traj_xyz = []
-    traj_len = []
-    for i in range(num_vehicles):
-        xyz = np.asarray(results["state"][i]["x"], dtype=float)[:, :3]  # (Ti,3)
-        traj_xyz.append(xyz)
-        traj_len.append(xyz.shape[0])
+    X = np.asarray(results["state"]["x"], dtype=float)  # (T,B,3)
+    T, B, _ = X.shape
+    if num_vehicles != B:
+        raise ValueError(f"num_vehicles={num_vehicles} but results has B={B} vehicles.")
 
-    num_frames = int(max(traj_len))
-    print(f"[basic_usage_swarm] 3D traj lengths: min={min(traj_len)}, max={max(traj_len)}")
+    traj_xyz = X[:, :, :3]  # (T,B,3)
+    num_frames = T
 
-    # Pre-allocate arrays with NaNs (NaNs are effectively ignored)
-    xs = np.full((num_vehicles,), np.nan, dtype=float)
-    ys = np.full((num_vehicles,), np.nan, dtype=float)
-    zs = np.full((num_vehicles,), np.nan, dtype=float)
+    print(f"[basic_usage_swarm] 3D batched traj: T={T}, B={B}")
 
     # ===================== Matplotlib setup =====================
     fig = plt.figure(figsize=(7, 6))
@@ -321,16 +314,14 @@ def _write_basic_usage_swarm_3d_video(
     ax.set_ylabel("y")
     ax.set_zlabel("z")
 
-    # Camera
     ax.view_init(elev=elev, azim=azim)
 
-    # Make axes aspect closer to equal (best-effort; Matplotlib varies by version)
     try:
         ax.set_box_aspect((vis_x_max - vis_x_min, vis_y_max - vis_y_min, vis_z_max - vis_z_min))
     except Exception:
         pass
 
-    # Target samples at z=0 (triangles)
+    # Target samples at z=0
     if samples_xy is not None and len(samples_xy) > 0:
         ax.scatter(
             samples_xy[:, 0],
@@ -343,13 +334,10 @@ def _write_basic_usage_swarm_3d_video(
             linewidths=0,
         )
 
-    # Initial vehicle positions
-    X0 = np.stack(
-        [np.asarray(results["state"][i]["x"], dtype=float)[0, :3] for i in range(num_vehicles)],
-        axis=0,
-    )
+    # Initial positions (k=0)
+    X0 = traj_xyz[0, :, :]  # (B,3)
 
-    colors = rng.random((num_vehicles, 3))
+    colors = rng.random((B, 3))
     scat = ax.scatter(X0[:, 0], X0[:, 1], X0[:, 2], s=20, c=colors, depthshade=True)
 
     fig.canvas.draw()
@@ -361,19 +349,11 @@ def _write_basic_usage_swarm_3d_video(
 
     # ===================== Frame loop =====================
     for k in range(num_frames):
-        for i in range(num_vehicles):
-            if k < traj_len[i]:
-                xs[i] = traj_xyz[i][k, 0]
-                ys[i] = traj_xyz[i][k, 1]
-                zs[i] = traj_xyz[i][k, 2]
-            else:
-                xs[i] = np.nan
-                ys[i] = np.nan
-                zs[i] = np.nan
+        xs = traj_xyz[k, :, 0]
+        ys = traj_xyz[k, :, 1]
+        zs = traj_xyz[k, :, 2]
 
-        # Update 3D scatter (mplot3d-specific)
         scat._offsets3d = (xs, ys, zs)
-
         ax.set_title(f"3D frame {k}/{num_frames-1} | elev={elev:.1f}, azim={azim:.1f}")
 
         fig.canvas.draw()
@@ -381,7 +361,6 @@ def _write_basic_usage_swarm_3d_video(
         buf = np.frombuffer(fig.canvas.tostring_argb(), dtype=np.uint8)
         buf = buf.reshape(height, width, 4)
         frame = buf[:, :, [3, 2, 1]]  # ARGB → BGR
-
         video.write(frame)
 
     video.release()
@@ -389,36 +368,11 @@ def _write_basic_usage_swarm_3d_video(
 
     print(f"[basic_usage_swarm] 3D Video written to: {avi_path}")
 
-def _save_basic_usage_swarm_csv(results, csv_path):
+
+def save_basic_usage_swarm_csv(results, csv_path):
     """
-    Save per-vehicle trajectories to CSV for your results format:
-      results['state'] is list[num_vehicles] of dicts; state['x'] is (Ti,3)
-
-    Output columns:
-      vehicle, step, x, y, z
-    """
-    import numpy as np
-    import pandas as pd
-
-    rows = []
-    num_vehicles = len(results["state"])
-
-    for i in range(num_vehicles):
-        Xi = np.asarray(results["state"][i]["x"], dtype=float)  # (Ti,3)
-        Ti = Xi.shape[0]
-        for k in range(Ti):
-            rows.append((i, k, Xi[k, 0], Xi[k, 1], Xi[k, 2]))
-
-    df = pd.DataFrame(rows, columns=["vehicle", "step", "x", "y", "z"])
-    df.to_csv(csv_path, index=False)
-    return df
-
-
-def _save_basic_usage_swarm_csv(results, csv_path):
-    """
-    Save per-vehicle trajectories to CSV for this results format:
-      results['state'] is list[num_vehicles] of dicts
-      results['state'][i]['x'] is (Ti, 3)
+    Batched results format:
+      results["state"]["x"] : (T, B, 3) numpy
 
     Output columns:
       vehicle, step, x, y, z
@@ -426,13 +380,16 @@ def _save_basic_usage_swarm_csv(results, csv_path):
     import numpy as np
     import csv
 
+    X = np.asarray(results["state"]["x"], dtype=float)  # (T,B,3)
+    T, B, _ = X.shape
+
     with open(csv_path, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["vehicle", "step", "x", "y", "z"])
 
-        for i in range(len(results["state"])):
-            Xi = np.asarray(results["state"][i]["x"], dtype=float)  # (Ti,3)
-            for step in range(Xi.shape[0]):
+        for i in range(B):
+            Xi = X[:, i, :]  # (T,3)
+            for step in range(T):
                 w.writerow([i, step, Xi[step, 0], Xi[step, 1], Xi[step, 2]])
 
 
@@ -465,6 +422,9 @@ def parse_args():
     parser.add_argument("--no-3d-video", action="store_true",
                         help="Disable 3D AVI output")
 
+    parser.add_argument("--use-cpu", action="store_true",
+                        help="Force CPU even if CUDA is available")
+
     return parser.parse_args()
 
 
@@ -474,7 +434,23 @@ def run_world(args):
     print("Start configuration")
     t0 = time.perf_counter()
 
-    # ===================== Param config =====================
+    # ------------------------------------------------------------
+    # Select the device, CPU or GPU
+    # ------------------------------------------------------------
+    if args.use_cpu:
+        device = torch.device("cpu")
+    else:
+        if torch.cuda.is_available():
+            device = torch.device(f"cuda:{torch.cuda.current_device()}")
+        else:
+            device = torch.device("cpu")
+
+    print(f"Using device: {device}")
+    dtype = torch.float64
+
+    # ------------------------------------------------------------
+    # Retrieve the common configuration
+    # ------------------------------------------------------------
     num_vehicles = args.num_vehicles
     num_samples = args.num_samples
     num_gmm_components = args.num_gmm_components
@@ -493,26 +469,29 @@ def run_world(args):
         )
     )
 
-    extents = _get_world_extents(world)
+    # Set up the sampling rate
+    dt = 0.01
+    sampling_rate = int(1/dt)
+
+    # ------------------------------------------------------------
+    # Set up visualization bounds
+    # ------------------------------------------------------------
+    extents = get_world_extents(world)
     x_min, x_max, y_min, y_max, z_min, z_max = extents.tolist()
 
-    # Visualization-only bounds (no plotting changes yet; kept for future use)
     vis_pad = 0.5
     vis_x_min, vis_x_max = x_min - vis_pad, x_max + vis_pad
     vis_y_min, vis_y_max = y_min - vis_pad, y_max + vis_pad
 
-    # ===================== Experiment knobs =====================
-
+    # ------------------------------------------------------------
+    # Fix the random seed
+    # ------------------------------------------------------------
     seed = 0  # edit this integer to change the deterministic run
     rng = np.random.default_rng(seed)
 
-    # ===================== Swarm setup =====================
-
-    vehicles = [Multirotor(quad_params) for _ in range(num_vehicles)]
-    controllers = [SE3Control(quad_params) for _ in range(num_vehicles)]
-
-    # ===================== Target distribution µ* (discrete samples) =====================
-
+    # ------------------------------------------------------------
+    # Construct the target positions
+    # ------------------------------------------------------------
     # Component centers in [-4, 4] for each axis
     mean_des = 8.0 * (rng.random((num_gmm_components, 2)) - 0.5)
 
@@ -520,8 +499,8 @@ def run_world(args):
     var_des = np.array([0.25, 0.25], dtype=float)
     std_des = np.sqrt(var_des)
 
-    # Samples inside world extents (rejection-sampled)
-    samples_xy = _sample_gmm_targets_xy_in_bounds(
+    # Generate the target position via Gaussian mixture model
+    samples_xy = sample_gmm_targets_xy_in_bounds(
         rng=rng,
         num_samples=num_samples,
         num_gmm_components=num_gmm_components,
@@ -533,11 +512,13 @@ def run_world(args):
         y_max=y_max,
     )
 
-    # targeted_positions are the samples (z=0)
-    targeted_positions = np.hstack([samples_xy, np.zeros((num_samples, 1), dtype=float)]).tolist()
+    # Initialize the targeted_positions (z=0)
+    targets = torch.zeros((num_samples, 3), device=device, dtype=dtype)
+    targets[:, 0] = torch.as_tensor(samples_xy[:, 0], device=device, dtype=dtype)
+    targets[:, 1] = torch.as_tensor(samples_xy[:, 1], device=device, dtype=dtype)
+    targeted_positions_tensor = targets
 
-    # ===================== DOOT config =====================
-
+    # Initialize the coordinator(s)
     # Neighbors: ceil(5% of N), force odd, cap at N-1
     k_raw = int(np.ceil(0.05 * num_vehicles))
     if (k_raw % 2) == 0:
@@ -550,31 +531,34 @@ def run_world(args):
         use_random_sampling=True,
         num_trial_move_samples=300,
         mean_trial_move=[0.0, 0.0, 0.0],
-        var_trial_move=[0.05, 0.05, 0.0],
+        var_trial_move=[0.05, 0.05, 1e-6],
         min_displacement_norm=0.1,
         planar_std_threshold=0.1,
     )
 
-    coordinator = DootCbfCoordinator(
-        vehicles=vehicles,
+    # ------------------------------------------------------------
+    # Initialize the coordinator
+    # ------------------------------------------------------------
+    # Since BatchedDootCbfCoordinator only uses the number of vehicles,
+    # just pass a dummy list
+    idxs = list(range(num_vehicles))
+    vehicles_list = [None] * num_vehicles
+    coordinator = BatchedDootCbfCoordinator(
+        vehicles=vehicles_list,
         velocity_max=1.0,
-        targeted_positions=targeted_positions,
+        targeted_positions=targeted_positions_tensor,
         doot_config=doot_config,
+        idxs=idxs
     )
 
-    t1 = time.perf_counter()
-    print(f"Finish configuration in {t1 - t0:.3f} seconds")
-
-    # ===================== Initial states (MUST come before trajectories) =====================
-
-    print("Start initialization")
-    t0 = time.perf_counter()
-
+    # ------------------------------------------------------------
+    # Construct the vehicle initial positions
+    # ------------------------------------------------------------
     # Agent init (ut02-style): N([5,5], diag([2,6])) with z=0, rejection-sampled inside world extents
     mean_init_xy = np.array([5.0, 5.0], dtype=float)
     std_init_xy = np.sqrt(np.array([2.0, 6.0], dtype=float))
 
-    pos_init_xy = _rejection_sample_xy(
+    pos_init_xy = rejection_sample_xy(
         rng=rng,
         num=num_vehicles,
         mean_xy=mean_init_xy,
@@ -586,69 +570,136 @@ def run_world(args):
     )
 
     # Build RotorPy initial-state dicts (z fixed at 0)
-    init_poss = []
+    init_rotor_speed = 1788.53
+
+    # positions (num_vehicles,3) torch
+    x_init = torch.zeros((num_vehicles, 3), device=device, dtype=dtype)
+    x_init[:, 0] = torch.as_tensor(pos_init_xy[:, 0], device=device, dtype=dtype)
+    x_init[:, 1] = torch.as_tensor(pos_init_xy[:, 1], device=device, dtype=dtype)
+    x_init[:, 2] = 0.0
+
+    init_positions = {
+        "x": x_init,
+        "v": torch.zeros((num_vehicles, 3), device=device, dtype=dtype),
+        "q": torch.tensor([0.0, 0.0, 0.0, 1.0], device=device, dtype=dtype).repeat(num_vehicles, 1),
+        "w": torch.zeros((num_vehicles, 3), device=device, dtype=dtype),
+        "wind": torch.zeros((num_vehicles, 3), device=device, dtype=dtype),
+        "rotor_speeds": torch.full((num_vehicles, 4), init_rotor_speed, device=device, dtype=dtype),
+    }
+
+    # ------------------------------------------------------------
+    # Initialize multirotors and controllers
+    # ------------------------------------------------------------
+    all_quad_params = [quad_params] * num_vehicles
+    batch_params = BatchedMultirotorParams(all_quad_params, num_vehicles, device=device)
+
+    batched_vehicle = BatchedMultirotor(
+        batch_params,
+        num_vehicles,
+        init_positions,
+        device=device,
+        integrator="dopri5",
+        control_abstraction="cmd_motor_speeds", # ToDo: study and experiment other control settings
+    )
+
+    # Optional: specify feedback gains for each drone in the batch. (can be different for each drone)
+    kp_pos = torch.tensor([6.5, 6.5, 15], device=device, dtype=dtype).repeat(num_vehicles, 1)
+    kd_pos = torch.tensor([4.0, 4.0, 9], device=device, dtype=dtype).repeat(num_vehicles, 1)
+    kp_att = torch.tensor([544.0], device=device, dtype=dtype).repeat(num_vehicles, 1)
+    kd_att = torch.tensor([46.64], device=device, dtype=dtype).repeat(num_vehicles, 1)
+    batched_controller = BatchedSE3Control(
+        batch_params,
+        num_vehicles,
+        device=device,
+        kp_pos=kp_pos, kd_pos=kd_pos,
+        kp_att=kp_att, kd_att=kd_att)
+
+
+    # ------------------------------------------------------------
+    # Initialize trajectories
+    # ------------------------------------------------------------
+    batched_trajectory = BatchedVelocityReference(
+        init_pos=init_positions["x"],     # (num_vehicles,3) torch
+        init_yaw=0.0,
+        init_time=0.0,
+        yaw_mode="velocity_heading",
+        yaw_speed_eps=1e-3,
+    )
+
+    # IMPORTANT: seed initial vel cmd so update() won’t throw
+    batched_trajectory.set_vel_cmd(torch.zeros((num_vehicles, 3), device=device, dtype=dtype))
+
+    # ------------------------------------------------------------
+    # Initialize the wind profile
+    # ------------------------------------------------------------
+    batched_wind_profile = BatchedNoWind(num_vehicles)
+
+    # ------------------------------------------------------------
+    # Initialize the IMU
+    # ------------------------------------------------------------
+    batched_imu = BatchedImu(num_vehicles, device=device)
+
+    # ------------------------------------------------------------
+    # Initialize the motion capture
+    # ------------------------------------------------------------
+    mocap_params_list = []
+    base_vel_artifact_prob = 0.001
     for i in range(num_vehicles):
-        p = np.array([pos_init_xy[i, 0], pos_init_xy[i, 1], 0.0], dtype=float)
+        mp_i = {
+            "pos_noise_density": (0.0005 * torch.ones((3,), dtype=dtype)),
+            "vel_noise_density": (0.005 * torch.ones((3,), dtype=dtype)),
+            "att_noise_density": (0.0005 * torch.ones((3,), dtype=dtype)),
+            "rate_noise_density": (0.0005 * torch.ones((3,), dtype=dtype)),
+            "vel_artifact_max": torch.tensor(5.0, dtype=dtype),
+            "vel_artifact_prob": torch.tensor(base_vel_artifact_prob * (1.0 + 0.1 * i), dtype=dtype),
+            "rate_artifact_max": torch.tensor(1.0, dtype=dtype),
+            "rate_artifact_prob": torch.tensor(0.0002, dtype=dtype),
+        }
+        mocap_params_list.append(mp_i)
+    with_artifacts_list = [(i % 2) == 0 for i in range(num_vehicles)]
+    batched_mocap = BatchedMotionCapture(num_vehicles,
+        sampling_rate=sampling_rate,
+        mocap_params=mocap_params_list,
+        with_artifacts=with_artifacts_list,
+        device=device)
 
-        # (Optional) if z=0 is outside z-bounds, fail early (should not happen with your world)
-        if not (z_min <= p[2] <= z_max):
-            raise RuntimeError(f"z=0 is outside world z-bounds [{z_min}, {z_max}].")
+    # ------------------------------------------------------------
+    # Initialize EKF wind
+    # ------------------------------------------------------------
+    batched_quad_params = convert_params_to_batched(all_quad_params, device=device)
+    batched_wind_ekf = BatchedWindEKF(num_vehicles, batched_quad_params, device=device)
 
-        init_poss.append(
-            {
-                "x": p,
-                "v": np.zeros(3, dtype=float),
-                "q": np.array([0.0, 0.0, 0.0, 1.0], dtype=float),
-                "w": np.zeros(3, dtype=float),
-                "wind": np.zeros(3, dtype=float),
-                "rotor_speeds": np.full(4, 1788.53, dtype=float),
-            }
-        )
-
-    # ===================== Trajectories (now init_poss exists) =====================
-
-    trajectories = [
-        VelocityReference(
-            init_pos=init_poss[i]["x"],
-            init_yaw=0.0,
-            init_time=0.0,
-            yaw_mode="velocity_heading",
-            yaw_speed_eps=1e-3,
-        )
-        for i in range(num_vehicles)
-    ]
-
-    # ===================== EnvironmentSwarm =====================
-
-    sim_instance = EnvironmentSwarm(
-        vehicles=vehicles,
-        controllers=controllers,
-        trajectories=trajectories,
+    # ------------------------------------------------------------
+    # Initialize the environment
+    # ------------------------------------------------------------
+    sim_instance = EnvironmentBatch(
+        vehicles=batched_vehicle,
+        controllers=batched_controller,
+        trajectories=batched_trajectory,
         coordinators=[coordinator],
-        imus=None,
-        mocaps=None,
-        estimators=None,
+        imus=batched_imu,
+        mocaps=batched_mocap,
+        estimators=batched_wind_ekf,
         world=world,
-        wind_profile=SinusoidWind(),
-        sim_rate=100,
+        wind_profile=batched_wind_profile,
+        sim_rate=sampling_rate,
         safety_margin=0.25,
     )
 
     # Set initial state AFTER environment is created
-    sim_instance.set_init(init_poss)
+    sim_instance.set_init(init_positions)
 
-    t1 = time.perf_counter()
-    print(f"Finish initialization in {t1 - t0:.3f} seconds")
 
-    # ===================== Run simulation =====================
-
+    # ------------------------------------------------------------
+    # Run simulation
+    # ------------------------------------------------------------
     print("Start simulation")
     t0 = time.perf_counter()
 
     results = sim_instance.run(
         t_final=t_final,
         use_mocap=False,
-        terminates=False,
+        terminate=False,
         animate_bool=False,
         animate_wind=False,
         verbose=True,
@@ -665,14 +716,13 @@ def run_world(args):
     t0 = time.perf_counter()
 
     # results['state'] is a list of dicts; each dict value may be list-like
-    for i in range(len(results.get("state", []))):
-        for k, v in results["state"][i].items():
-            if isinstance(v, list):
-                results["state"][i][k] = np.asarray(v)
+    for k, v in results["state"].items():
+        if isinstance(v, list):
+            results["state"][k] = np.asarray(v)
 
     # 2D video
     vis_output_name = output_name + ".avi"
-    _write_basic_usage_swarm_2d_video(
+    write_basic_usage_swarm_2d_video(
         results, vis_output_name,
         x_min, x_max, y_min, y_max,
         num_vehicles, samples_xy, rng
@@ -681,7 +731,7 @@ def run_world(args):
     # 3D video
     if not args.no_3d_video:
         vis_output_name_3d = output_name + "_3d.avi"
-        _write_basic_usage_swarm_3d_video(
+        write_basic_usage_swarm_3d_video(
             results, vis_output_name_3d,
             x_min, x_max, y_min, y_max, z_min, z_max,
             num_vehicles, samples_xy, rng,
@@ -693,22 +743,22 @@ def run_world(args):
     print(f"Finish visualization output in {t1 - t0:.3f} seconds")
 
 
-    # ===================== Save & postprocess =====================
-
+    # ------------------------------------------------------------
+    # Save & postprocess
+    # ------------------------------------------------------------
     print("Start CSV output")
     t0 = time.perf_counter()
 
     out_dir = os.path.dirname(os.path.abspath(__file__))
     csv_file_name = output_name + ".csv"
     csv_path = os.path.join(out_dir, csv_file_name)
-    _save_basic_usage_swarm_csv(results, csv_path)
+    save_basic_usage_swarm_csv(results, csv_path)
     print(f"[basic_usage_swarm] CSV written to: {csv_path}")
 
     t1 = time.perf_counter()
     print(f"Finish CSV output in {t1 - t0:.3f} seconds")
 
 
-########## Main ##########
 if __name__ == "__main__":
     import time
 

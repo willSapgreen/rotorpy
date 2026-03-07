@@ -776,7 +776,8 @@ class BatchedMultirotor(object):
         integrator: str, "dopri5" or "rk4", which are adaptive or fixed step size integrators. "rk4" will be faster, but potentially less accurate.
     """
 
-    def __init__(self, batched_params,
+    def __init__(self,
+                 batched_params,
                  num_drones,
                  initial_states,
                  device,
