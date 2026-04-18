@@ -742,6 +742,36 @@ class BatchedDootCbfCoordinator:
         wsum = torch.sum(w, dim=1).clamp(min=eps)
         return torch.sum(w * v, dim=1) / wsum  # (Q,)
 
+    def _scipy_interp_phi(
+        self,
+        query: torch.Tensor,   # (Q, D)
+        sites: torch.Tensor,   # (N, D)
+        values: torch.Tensor,  # (N,)
+    ) -> torch.Tensor:
+        """Scipy LinearNDInterpolator + NearestNDInterpolator fallback.
+
+        Exactly replicates the interpolation used in DootCbfCoordinator:
+          - Inside convex hull : piecewise-linear (Delaunay triangulation)
+          - Outside convex hull: nearest-neighbor (no extrapolation artifacts)
+
+        No gradients are needed through this call (phi interpolation is used
+        only to select the best displacement via argmin), so the numpy
+        round-trip is safe.
+        """
+        sites_np  = sites.detach().cpu().numpy()
+        values_np = values.detach().cpu().numpy()
+        query_np  = query.detach().cpu().numpy()
+
+        phi_lin = LinearNDInterpolator(sites_np, values_np, fill_value=np.nan)
+        phi_nn  = NearestNDInterpolator(sites_np, values_np)
+
+        v = phi_lin(query_np).astype(np.float64)
+        mask = ~np.isfinite(v)
+        if np.any(mask):
+            v[mask] = phi_nn(query_np[mask])
+
+        return torch.as_tensor(v, device=query.device, dtype=query.dtype)  # (Q,)
+
     def _kde_rho_grad(
         self,
         positions_prev: torch.Tensor,  # (N,3)
@@ -938,13 +968,10 @@ class BatchedDootCbfCoordinator:
             query = pos_trial.reshape(-1, 3)                  # (N*K,3)
             sites = pos_eval                                  # (N,3)
 
-        phi_q = self._knn_interp_phi(
+        phi_q = self._scipy_interp_phi(
             query=query,
             sites=sites,
             values=self._phi,
-            k=int(self._doot.num_neighbors),
-            eps=1e-6,
-            p=2.0,
         ).reshape(self._num_vehicles, K)  # (N,K)
 
         cost = norms.unsqueeze(0) + phi_q  # (N,K)

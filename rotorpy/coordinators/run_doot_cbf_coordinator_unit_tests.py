@@ -6,7 +6,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 import cv2
 
-from doot_cbf_coordinator import DootCbfCoordinator, DootConfig, CbfConfig
+import torch
+
+from doot_cbf_coordinator import DootCbfCoordinator, BatchedDootCbfCoordinator, DootConfig, CbfConfig
 
 
 # =========================
@@ -624,6 +626,53 @@ def unit_test_03():
     eps_min = float(cbf_config.density_lower_bound)
 
     # -----------------------------
+    # Correctness check: replay Python CBF and compare reconstructed
+    # positions against MATLAB log.
+    #
+    # At each step t:
+    #   v_cbf_py[t] = Python CBF projection of v_nom_log[t] using x_prev_cbf_log[t]
+    #   x_next_py   = x_prev_cbf_log[t] + v_cbf_py[t] * dt
+    # Expected: x_next_py ≈ x_prev_cbf_log[t+1]
+    # -----------------------------
+    print("[unit_test_03] Running correctness check ...")
+
+    max_pos_err = 0.0
+    sum_sq_err  = 0.0
+    num_samples = 0
+    tol = 1e-3
+
+    for t in range(T - 1):
+        xy_cbf   = x_prev_cbf_log[t]   # (N,2)
+        v_nom_2d = v_nom_log[t]         # (N,2)
+
+        pos_3d   = np.hstack([xy_cbf,   np.zeros((N, 1), dtype=float)])  # (N,3)
+        v_nom_3d = np.hstack([v_nom_2d, np.zeros((N, 1), dtype=float)])  # (N,3)
+
+        v_cbf_3d = np.zeros_like(v_nom_3d)
+        for m in range(N):
+            rho_m, grad_m = coordinator._compute_kde_density_and_gradient(
+                pos_3d, m, planar=True, axes_2d=(0, 1)
+            )
+            v_cbf_3d[m] = coordinator._apply_cbf_projection(v_nom_3d[m], rho_m, grad_m)
+
+        x_next_py  = xy_cbf + v_cbf_3d[:, :2] * dt_mat  # (N,2)
+        x_next_mat = x_prev_cbf_log[t + 1]               # (N,2)
+
+        err = np.linalg.norm(x_next_py - x_next_mat, axis=1)  # (N,)
+        max_pos_err  = max(max_pos_err, float(np.max(err)))
+        sum_sq_err  += float(np.sum(err ** 2))
+        num_samples += N
+
+    rmse = float(np.sqrt(sum_sq_err / num_samples))
+    print(f"[unit_test_03] Correctness: max_pos_err={max_pos_err:.6f} m  RMSE={rmse:.6f} m  (tol={tol} m)")
+
+    if max_pos_err > tol:
+        raise AssertionError(
+            f"[unit_test_03] FAILED: max positional error {max_pos_err:.6f} m exceeds tolerance {tol} m"
+        )
+    print("[unit_test_03] PASSED correctness check.")
+
+    # -----------------------------
     # Video output + plot setup
     # -----------------------------
     out_dir = os.path.dirname(os.path.abspath(__file__))
@@ -792,8 +841,295 @@ def unit_test_03():
     print(f"[unit_test_03] Wrote video: {avi_path}")
 
 
+def unit_test_04(device: str = "cpu"):
+    """
+    BatchedDootCbfCoordinator: 20 vehicles, one targeted position.
+    Mirrors unit_test_01 using the batched torch coordinator.
+    Positions are maintained as a single (N,3) torch tensor for vectorized integration.
+    """
+    dtype = torch.float64
+    dev   = torch.device(device)
+
+    num_vehicles = 20
+    vehicles     = [None] * num_vehicles
+
+    targeted_positions = torch.zeros((1, 3), dtype=dtype, device=dev)  # one target at origin
+
+    sim_time  = 200
+    dt        = 1.0
+    intervals = int(sim_time / dt)
+
+    # Initial positions: same sampling as unit_test_01
+    bounds    = np.array([[-5, 5], [-5, 5], [-0.5, 3]], dtype=float)
+    mean_init = np.array([4.0, 4.0, 0.0], dtype=float)
+    std_init  = np.sqrt(np.array([1.0, 3.0, 0.0], dtype=float))
+
+    rng    = np.random.default_rng(0)
+    x0_np  = np.empty((0, 3), dtype=float)
+    while x0_np.shape[0] < num_vehicles:
+        batch      = rng.normal(loc=mean_init, scale=std_init, size=(num_vehicles, 3))
+        batch[:, 2] = mean_init[2]
+        ok    = np.all((batch >= bounds[:, 0]) & (batch <= bounds[:, 1]), axis=1)
+        x0_np = np.vstack([x0_np, batch[ok]])
+    x0_np = x0_np[:num_vehicles]
+
+    # (N, 3) torch tensor — kept on device throughout for vectorized integration
+    pos = torch.tensor(x0_np, dtype=dtype, device=dev)
+
+    doot_config = DootConfig(
+        num_neighbors=min(5, num_vehicles - 1),
+        max_iter_primaldual=10,
+        use_random_sampling=False,
+        num_trial_move_samples=300,
+        min_displacement_norm=0.1,
+        planar_std_threshold=0.1,
+    )
+
+    coordinator = BatchedDootCbfCoordinator(
+        vehicles=vehicles,
+        velocity_max=1.0,
+        targeted_positions=targeted_positions,
+        doot_config=doot_config,
+        dtype=dtype,
+        device=dev,
+        idxs=list(range(num_vehicles)),
+    )
+
+    out_dir  = os.path.dirname(os.path.abspath(__file__))
+    avi_path = os.path.join(out_dir, "doot_cbf_coordinator_ut04.avi")
+
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ax.set_xlim(bounds[0, 0], bounds[0, 1])
+    ax.set_ylim(bounds[1, 0], bounds[1, 1])
+    ax.set_aspect("equal")
+    ax.grid(True)
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+    ax.plot(targeted_positions.cpu().numpy()[:, 0],
+            targeted_positions.cpu().numpy()[:, 1], "rx", markersize=10)
+
+    colors = np.random.rand(num_vehicles, 3)
+    scat   = ax.scatter(pos.cpu().numpy()[:, 0], pos.cpu().numpy()[:, 1], s=20, c=colors)
+
+    fig.canvas.draw()
+    width, height = fig.canvas.get_width_height()
+    video = cv2.VideoWriter(avi_path, cv2.VideoWriter_fourcc(*"XVID"), 10, (width, height))
+
+    cur_time = 0.0
+    for _ in range(intervals):
+        cur_time += dt
+
+        # Build states list: pos[i] is a tensor view — no copy
+        states = [{"x": pos[i]} for i in range(num_vehicles)]
+        coordinator.step(cur_time, states)
+
+        # Vectorized integration: single tensor op on device
+        vel = coordinator.get_vel_cmds()  # (N, 3) torch
+        pos = pos + vel * dt
+
+        scat.set_offsets(pos.cpu().numpy()[:, :2])
+        ax.set_title(f"cur_time = {cur_time:.2f} s")
+
+        fig.canvas.draw()
+        buf   = np.frombuffer(fig.canvas.tostring_argb(), dtype=np.uint8).reshape(height, width, 4)
+        video.write(buf[:, :, [3, 2, 1]])
+
+    video.release()
+    plt.close(fig)
+
+
+def unit_test_05(device: str = "cpu"):
+    """
+    BatchedDootCbfCoordinator: 200 vehicles, 500 targets, side-by-side nominal vs CBF.
+    Mirrors unit_test_02 using the batched torch coordinator.
+    CBF projection is applied manually (coordinator uses apply_cbf=False),
+    mirroring the pattern of unit_test_02.
+    """
+    from matplotlib.colors import ListedColormap
+
+    dtype  = torch.float64
+    dev    = torch.device(device)
+
+    num_vehicles = 200
+    vehicles     = [None] * num_vehicles
+    num_targets  = 500
+    components   = 20
+    dom_size     = 5
+
+    sim_time  = 200
+    dt        = 1.0
+    intervals = int(sim_time / dt)
+
+    rng = np.random.default_rng(10)
+
+    # Target distribution: same as unit_test_02
+    mean_des = 8.0 * (rng.random((components, 2)) - 0.5)
+    cov_des  = np.diag(np.array([0.25, 0.25], dtype=float))
+    comp_ids   = rng.integers(low=0, high=components, size=num_targets)
+    samples_xy = np.empty((num_targets, 2), dtype=float)
+    for k in range(components):
+        idx = np.where(comp_ids == k)[0]
+        if idx.size > 0:
+            samples_xy[idx] = rng.multivariate_normal(mean=mean_des[k], cov=cov_des, size=idx.size)
+
+    targets_np         = np.hstack([samples_xy, np.zeros((num_targets, 1), dtype=float)])
+    targeted_positions = torch.tensor(targets_np, dtype=dtype, device=dev)  # (M, 3)
+
+    # Initial agent distribution: same as unit_test_02
+    pos_init_xy = rng.multivariate_normal(
+        mean=np.array([5.0, 5.0]),
+        cov=np.diag(np.array([2.0, 6.0])),
+        size=num_vehicles,
+    )
+    pos_init_np = np.hstack([pos_init_xy, np.zeros((num_vehicles, 1), dtype=float)])
+
+    # Two (N,3) tensors kept on device: nominal and CBF trajectories
+    pos_nom = torch.tensor(pos_init_np, dtype=dtype, device=dev)
+    pos_cbf = pos_nom.clone()
+
+    doot_config = DootConfig(
+        num_neighbors=min(10, num_vehicles - 1),
+        max_iter_primaldual=20,
+        use_random_sampling=False,
+        num_trial_move_samples=300,
+        min_displacement_norm=0.1,
+        planar_std_threshold=0.1,
+    )
+
+    cbf_config = CbfConfig(
+        density_upper_gain=100.0,
+        density_lower_gain=1000.0,
+        density_upper_bound=0.045,
+        density_lower_bound=0.011,
+        kde_bandwidth=0.3,
+    )
+
+    # apply_cbf=False: CBF projection applied manually below, same pattern as unit_test_02
+    coordinator = BatchedDootCbfCoordinator(
+        vehicles=vehicles,
+        velocity_max=1.0,
+        targeted_positions=targeted_positions,
+        doot_config=doot_config,
+        apply_cbf=False,
+        cbf_config=cbf_config,
+        dtype=dtype,
+        device=dev,
+        idxs=list(range(num_vehicles)),
+    )
+
+    eps     = float(cbf_config.density_upper_bound)
+    eps_min = float(cbf_config.density_lower_bound)
+    bw      = float(cbf_config.kde_bandwidth)
+    R       = float(cbf_config.kde_radius_bar)
+
+    out_dir  = os.path.dirname(os.path.abspath(__file__))
+    avi_path = os.path.join(out_dir, "doot_cbf_coordinator_ut05_side_by_side.avi")
+
+    fig, (ax_l, ax_r) = plt.subplots(1, 2, figsize=(12, 6))
+    for ax in (ax_l, ax_r):
+        ax.set_aspect("equal")
+        ax.grid(True)
+        ax.set_xlabel("x")
+        ax.set_ylabel("y")
+        ax.scatter(samples_xy[:, 0], samples_xy[:, 1], s=8, c="k", alpha=0.15, linewidths=0)
+
+    colors = rng.random((num_vehicles, 3))
+    xy0    = pos_nom.cpu().numpy()[:, :2]
+    scatL  = ax_l.scatter(xy0[:, 0], xy0[:, 1], s=20, c=colors)
+    scatR  = ax_r.scatter(xy0[:, 0], xy0[:, 1], s=20, c=colors)
+
+    sparse_kwargs = dict(s=120, marker="s", facecolors=(1.0, 0.8, 0.2),
+                         edgecolors=(1.0, 0.6, 0.0), linewidths=1.5, alpha=0.4, zorder=5)
+    sparse_l = ax_l.scatter([], [], **sparse_kwargs)
+    sparse_r = ax_r.scatter([], [], **sparse_kwargs)
+
+    pts     = np.linspace(-2 * dom_size, 2 * dom_size, 50)
+    Xg, Yg  = np.meshgrid(pts, pts)
+    red_cmap = ListedColormap([(1.0, 0.0, 0.0, 1.0)])
+    imshow_kwargs = dict(extent=[pts[0], pts[-1], pts[0], pts[-1]],
+                         origin="lower", cmap=red_cmap, alpha=0.0, zorder=3)
+    maskL = ax_l.imshow(np.zeros_like(Xg, dtype=float), **imshow_kwargs)
+    maskR = ax_r.imshow(np.zeros_like(Xg, dtype=float), **imshow_kwargs)
+
+    for ax in (ax_l, ax_r):
+        ax.set_xlim(pts[0], pts[-1])
+        ax.set_ylim(pts[0], pts[-1])
+
+    fig.canvas.draw()
+    width, height = fig.canvas.get_width_height()
+    video = cv2.VideoWriter(avi_path, cv2.VideoWriter_fourcc(*"XVID"), 10, (width, height))
+
+    cur_time = 0.0
+    for _ in range(intervals):
+        # Snapshot previous positions for overlay and CBF computation
+        x_prev_nom = pos_nom.clone()
+        x_prev_cbf = pos_cbf.clone()
+
+        planar_nom, axes_2d_nom, _ = BatchedDootCbfCoordinator._planar_axes(
+            x_prev_nom, doot_config.planar_std_threshold)
+        planar_cbf, axes_2d_cbf, _ = BatchedDootCbfCoordinator._planar_axes(
+            x_prev_cbf, doot_config.planar_std_threshold)
+
+        # DOOT step driven by nominal positions
+        cur_time += dt
+        states_nom = [{"x": pos_nom[i]} for i in range(num_vehicles)]
+        coordinator.step(cur_time, states_nom)
+        v_nom = coordinator.get_vel_cmds().clone()  # (N, 3)
+        v_nom[:, 2] = 0.0
+
+        # Manual CBF projection using previous CBF positions — mirrors unit_test_02
+        rho, grad = coordinator._kde_rho_grad(x_prev_cbf, planar=planar_cbf, axes_2d=axes_2d_cbf)
+        v_cbf = coordinator._cbf_project(v_nom, rho, grad)
+        v_cbf[:, 2] = 0.0
+
+        # Vectorized integration on device
+        pos_nom = pos_nom + v_nom * dt
+        pos_cbf = pos_cbf + v_cbf * dt
+        pos_nom[:, 2] = 0.0
+        pos_cbf[:, 2] = 0.0
+
+        scatL.set_offsets(pos_nom.cpu().numpy()[:, :2])
+        scatR.set_offsets(pos_cbf.cpu().numpy()[:, :2])
+
+        # Grid KDE overlay (numpy helper, uses previous positions)
+        xy_prev_nom_np = x_prev_nom.cpu().numpy()[:, :2]
+        xy_prev_cbf_np = x_prev_cbf.cpu().numpy()[:, :2]
+        rho_grid_nom = compute_kde_local_grid(xy_prev_nom_np, Xg, Yg, bw=bw, R=R)
+        rho_grid_cbf = compute_kde_local_grid(xy_prev_cbf_np, Xg, Yg, bw=bw, R=R)
+        mask_nom = (rho_grid_nom >= eps).astype(float)
+        mask_cbf = (rho_grid_cbf >= eps).astype(float)
+        maskL.set_data(mask_nom); maskL.set_alpha(mask_nom)
+        maskR.set_data(mask_cbf); maskR.set_alpha(mask_cbf)
+
+        # Sparse squares: use batched KDE (one call per frame, no per-agent loop)
+        rho_nom_agents, _ = coordinator._kde_rho_grad(
+            x_prev_nom, planar=planar_nom, axes_2d=axes_2d_nom)
+        rho_cbf_agents, _ = coordinator._kde_rho_grad(
+            x_prev_cbf, planar=planar_cbf, axes_2d=axes_2d_cbf)
+        rho_nom_np = rho_nom_agents.cpu().numpy()
+        rho_cbf_np = rho_cbf_agents.cpu().numpy()
+        sparse_l.set_offsets(xy_prev_nom_np[rho_nom_np < eps_min])
+        sparse_r.set_offsets(xy_prev_cbf_np[rho_cbf_np < eps_min])
+
+        ax_l.set_title(f"Nominal (no CBF)   cur_time = {cur_time:.2f} s")
+        ax_r.set_title(f"With CBF          cur_time = {cur_time:.2f} s")
+
+        fig.canvas.draw()
+        buf = np.frombuffer(fig.canvas.tostring_argb(), dtype=np.uint8).reshape(height, width, 4)
+        video.write(buf[:, :, [3, 2, 1]])
+
+    video.release()
+    plt.close(fig)
+
+
 if __name__ == "__main__":
     import time
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--device", type=str, default="cpu",
+                        help="torch device for tests 04/05 (e.g. 'cpu' or 'cuda:0')")
+    args = parser.parse_args()
 
     print("==== Start DootCbfCoordinator Unit Tests ====")
 
@@ -812,5 +1148,14 @@ if __name__ == "__main__":
     t5 = time.perf_counter()
     print(f"[unit_test_03] Complete MATLAB log replay comparison in {t5 - t4:.3f} seconds")
 
+    t6 = time.perf_counter()
+    unit_test_04(device=args.device)
+    t7 = time.perf_counter()
+    print(f"[unit_test_04] Batched - one target unit test in {t7 - t6:.3f} seconds")
+
+    t8 = time.perf_counter()
+    unit_test_05(device=args.device)
+    t9 = time.perf_counter()
+    print(f"[unit_test_05] Batched - multiple targets w/ and w/o CBF test in {t9 - t8:.3f} seconds")
 
     print("==== Finish DootCbfCoordinator Unit Tests ====")
