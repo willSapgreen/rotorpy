@@ -190,6 +190,7 @@ def unit_test_01():
         velocity_max=1.0,
         targeted_positions=targeted_positions,
         doot_config=doot_config,
+        idxs=list(range(num_vehicles)),
     )
 
     # Output path: same directory as doot_cbf_coordinator.py
@@ -349,6 +350,7 @@ def unit_test_02():
         doot_config=doot_config,
         apply_cbf=False,
         cbf_config=cbf_config,
+        idxs=list(range(num_vehicles)),
     )
 
     # =========================
@@ -615,6 +617,7 @@ def unit_test_03():
         doot_config=doot_config,
         apply_cbf=False,   # we apply projection manually
         cbf_config=cbf_config,
+        idxs=list(range(N)),
     )
 
     eps = float(cbf_config.density_upper_bound)
