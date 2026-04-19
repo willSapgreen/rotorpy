@@ -793,15 +793,15 @@ class BatchedDootCbfCoordinator:
             ax0, ax1 = int(axes_2d[0]), int(axes_2d[1])
             X2 = X[:, (ax0, ax1)]  # (N,2)
 
-            diffs = X2.unsqueeze(1) - X2.unsqueeze(0)  # (N,N,2)
+            diffs = X2.unsqueeze(0) - X2.unsqueeze(1)  # (N,N,2): diffs[i,j] = x_j - x_i
             d2 = torch.sum(diffs * diffs, dim=2)       # (N,N)
             d = torch.sqrt(d2)
 
-            neigh = (d <= R) & (d > 0.0)
+            neigh = (d <= R) & (d >= 0.0)
             w = torch.exp(-d2 / (2.0 * bw * bw)) * neigh.to(X.dtype)
 
-            # truncated normalization like your planar version
-            C = 2.0 * math.pi * bw**2 * (1.0 - math.exp(-0.5))
+            # truncated Gaussian normalization over disk of radius R
+            C = 2.0 * math.pi * bw**2 * (1.0 - math.exp(-R**2 / (2.0 * bw**2)))
             rho = torch.sum(w, dim=1) / (float(N) * C)
 
             grad2 = -(1.0 / (float(N) * C * (bw**2))) * torch.sum(diffs * w.unsqueeze(2), dim=1)
@@ -810,11 +810,11 @@ class BatchedDootCbfCoordinator:
             grad[:, ax1] = grad2[:, 1]
             return rho, grad
 
-        diffs = X.unsqueeze(1) - X.unsqueeze(0)  # (N,N,3)
+        diffs = X.unsqueeze(0) - X.unsqueeze(1)  # (N,N,3): diffs[i,j] = x_j - x_i
         d2 = torch.sum(diffs * diffs, dim=2)     # (N,N)
         d = torch.sqrt(d2)
 
-        neigh = (d <= R) & (d > 0.0)
+        neigh = (d <= R) & (d >= 0.0)
         w = torch.exp(-d2 / (2.0 * bw * bw)) * neigh.to(X.dtype)
 
         C = (2.0 * math.pi) ** 1.5 * (bw ** 3)
@@ -858,7 +858,7 @@ class BatchedDootCbfCoordinator:
         n = torch.linalg.norm(v, dim=1).clamp(min=1e-12)
         mask = n > 1.0
         if torch.any(mask):
-            v = v / n.unsqueeze(1)
+            v = torch.where(mask.unsqueeze(1), v / n.unsqueeze(1), v)
         return v
 
 
