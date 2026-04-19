@@ -5,9 +5,11 @@ Test script for DOOT coordinator with RotorPy swarm simulation.
 
 
 import os
+import csv
 import argparse
 import numpy as np
 import torch
+from scipy.spatial.transform import Rotation
 
 from rotorpy.environments import EnvironmentBatch
 from rotorpy.world import World
@@ -24,8 +26,15 @@ from rotorpy.estimators.wind_ekf import BatchedWindEKF
 
 from rotorpy.coordinators.doot_cbf_coordinator import (
     BatchedDootCbfCoordinator,
+    CbfConfig,
     DootConfig,
 )
+
+from rotorpy.utils.animate import animate
+from rotorpy.utils.plotter import Plotter
+
+import matplotlib
+import matplotlib.pyplot as plt
 
 
 def get_world_extents(world_obj) -> np.ndarray:
@@ -164,7 +173,7 @@ def convert_params_to_batched(all_params, device='cpu'):
 
 def write_basic_usage_swarm_2d_video(
     results,
-    vis_output_name,
+    vis_output_path,
     x_min, x_max, y_min, y_max,
     num_vehicles,
     samples_xy,
@@ -174,14 +183,7 @@ def write_basic_usage_swarm_2d_video(
     Batched results format:
       results["state"]["x"] : (T, B, 3) numpy
     """
-    import os
     import cv2
-    import numpy as np
-    import matplotlib.pyplot as plt
-
-    # ===================== Output path =====================
-    out_dir = os.path.dirname(os.path.abspath(__file__))
-    avi_path = os.path.join(out_dir, vis_output_name)
 
     # ===================== Visualization bounds =====================
     vis_pad = 0.5
@@ -192,7 +194,6 @@ def write_basic_usage_swarm_2d_video(
     X = np.asarray(results["state"]["x"], dtype=float)  # (T,B,3)
     T, B, _ = X.shape
     if num_vehicles != B:
-        # Keep behavior deterministic and explicit
         raise ValueError(f"num_vehicles={num_vehicles} but results has B={B} vehicles.")
 
     traj_xy = X[:, :, :2]  # (T,B,2)
@@ -234,8 +235,8 @@ def write_basic_usage_swarm_2d_video(
 
     # ===================== OpenCV writer =====================
     width, height = fig.canvas.get_width_height()
-    fourcc = cv2.VideoWriter_fourcc(*"XVID")
-    video = cv2.VideoWriter(avi_path, fourcc, 60, (width, height))
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    video = cv2.VideoWriter(vis_output_path, fourcc, 60, (width, height))
 
     # ===================== Frame loop =====================
     for k in range(num_frames):
@@ -253,12 +254,12 @@ def write_basic_usage_swarm_2d_video(
     video.release()
     plt.close(fig)
 
-    print(f"[basic_usage_swarm] Video written to: {avi_path}")
+    print(f"[basic_usage_swarm] 2D video written to: {vis_output_path}")
 
 
 def write_basic_usage_swarm_3d_video(
     results,
-    vis_output_name_3d,
+    vis_output_path_3d,
     x_min, x_max, y_min, y_max, z_min, z_max,
     num_vehicles,
     samples_xy,
@@ -271,15 +272,8 @@ def write_basic_usage_swarm_3d_video(
     Batched results format:
       results["state"]["x"] : (T, B, 3) numpy
     """
-    import os
     import cv2
-    import numpy as np
-    import matplotlib.pyplot as plt
     from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 (needed for 3D)
-
-    # ===================== Output path =====================
-    out_dir = os.path.dirname(os.path.abspath(__file__))
-    avi_path = os.path.join(out_dir, vis_output_name_3d)
 
     # ===================== Visualization bounds =====================
     vis_pad = 0.5
@@ -344,8 +338,8 @@ def write_basic_usage_swarm_3d_video(
 
     # ===================== OpenCV writer =====================
     width, height = fig.canvas.get_width_height()
-    fourcc = cv2.VideoWriter_fourcc(*"XVID")
-    video = cv2.VideoWriter(avi_path, fourcc, fps, (width, height))
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    video = cv2.VideoWriter(vis_output_path_3d, fourcc, fps, (width, height))
 
     # ===================== Frame loop =====================
     for k in range(num_frames):
@@ -366,7 +360,7 @@ def write_basic_usage_swarm_3d_video(
     video.release()
     plt.close(fig)
 
-    print(f"[basic_usage_swarm] 3D Video written to: {avi_path}")
+    print(f"[basic_usage_swarm] 3D video written to: {vis_output_path_3d}")
 
 
 def save_basic_usage_swarm_csv(results, csv_path):
@@ -377,9 +371,6 @@ def save_basic_usage_swarm_csv(results, csv_path):
     Output columns:
       vehicle, step, x, y, z
     """
-    import numpy as np
-    import csv
-
     X = np.asarray(results["state"]["x"], dtype=float)  # (T,B,3)
     T, B, _ = X.shape
 
@@ -393,13 +384,132 @@ def save_basic_usage_swarm_csv(results, csv_path):
                 w.writerow([i, step, Xi[step, 0], Xi[step, 1], Xi[step, 2]])
 
 
+def save_agent_csv(agent_result, csv_path):
+    """
+    Save a single agent's position and velocity time series to a CSV file.
+
+    Columns: step, x, y, z, vx, vy, vz
+    """
+    x = np.asarray(agent_result["state"]["x"], dtype=float)   # (T, 3)
+    v = np.asarray(agent_result["state"]["v"], dtype=float)   # (T, 3)
+    T = x.shape[0]
+
+    with open(csv_path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["step", "x", "y", "z", "vx", "vy", "vz"])
+        for step in range(T):
+            w.writerow([step,
+                        x[step, 0], x[step, 1], x[step, 2],
+                        v[step, 0], v[step, 1], v[step, 2]])
+
+
+def save_swarm_animation(results, output_folder, output_name, world, target_positions_xy=None):
+    """
+    Save a quadrotor-mesh animation (via animate.py) for all agents to the output folder.
+    Filename: <output_name>_animation.mp4
+
+    Parameters
+    ----------
+    target_positions_xy : (K, 2) array or None
+        XY positions of targets. If provided, they are rendered as semi-transparent
+        3D pyramids at z=0 throughout the animation.
+    """
+    X = np.asarray(results["state"]["x"], dtype=float)      # (T, B, 3)
+    Q = np.asarray(results["state"]["q"], dtype=float)      # (T, B, 4)
+    W = np.asarray(results["state"]["wind"], dtype=float)   # (T, B, 3)
+    T_steps, B, _ = X.shape
+
+    # Build rotation matrices (T, B, 3, 3)
+    rot = np.stack(
+        [Rotation.from_quat(Q[:, b, :]).as_matrix() for b in range(B)],
+        axis=1,
+    )  # (T, B, 3, 3)
+
+    # Use drone-0 time vector
+    times = np.asarray(results["time"], dtype=float)  # (T, B)
+    time_vec = times[:, 0]  # (T,)
+
+    # Build (K, 3) target array at z=0
+    targets_3d = None
+    if target_positions_xy is not None:
+        targets_np = np.asarray(target_positions_xy, dtype=float)  # (K, 2)
+        targets_3d = np.zeros((targets_np.shape[0], 3), dtype=float)
+        targets_3d[:, :2] = targets_np
+
+    animation_filename = output_name + "_animation.mp4"
+
+    animate(
+        time_vec,
+        X,
+        rot,
+        W,
+        animate_wind=False,
+        world=world,
+        filename=animation_filename,
+        save_dir=output_folder,
+        target_positions=targets_3d,
+        close_on_finish=True,
+    )
+
+
+def save_per_agent_outputs(results, world, output_folder, num_vehicles, output_name):
+    """
+    For each agent i:
+      - Create output_folder/<i:03d>/
+      - Save per-agent plots (all types matching basic_usage.py)
+      - Save per-agent CSV (step, x, y, z, vx, vy, vz)
+    """
+    for i in range(num_vehicles):
+        agent_dir = os.path.join(output_folder, f"{i:03d}")
+        os.makedirs(agent_dir, exist_ok=True)
+
+        # Slice batched results → single-vehicle result dict
+        agent_result = {
+            "time":               np.asarray(results["time"][:, i], dtype=float),
+            "state":              {k: np.asarray(v[:, i, ...], dtype=float)
+                                   for k, v in results["state"].items()},
+            "control":            {k: np.asarray(v[:, i, ...], dtype=float)
+                                   for k, v in results["control"].items()},
+            "flat":               {k: np.asarray(v[:, i, ...], dtype=float)
+                                   for k, v in results["flat"].items()},
+            "imu_measurements":   {k: np.asarray(v[:, i, ...], dtype=float)
+                                   for k, v in results["imu_measurements"].items()},
+            "imu_gt":             {k: np.asarray(v[:, i, ...], dtype=float)
+                                   for k, v in results["imu_gt"].items()},
+            "mocap_measurements": {k: np.asarray(v[:, i, ...], dtype=float)
+                                   for k, v in results["mocap_measurements"].items()},
+            "state_estimate":     {k: np.asarray(v[:, i, ...], dtype=float)
+                                   for k, v in results["state_estimate"].items()},
+        }
+
+        # --- Plots ---
+        fname_prefix = f"{i:03d}"
+        plotter = Plotter(agent_result, world)
+        plotter.plot_results(
+            plot_mocap=True,
+            plot_estimator=True,
+            plot_imu=True,
+            fname=fname_prefix,
+            save_dir=agent_dir,
+            show=False,
+        )
+        plt.close("all")
+
+        # --- Per-agent CSV ---
+        agent_csv_path = os.path.join(agent_dir, fname_prefix + ".csv")
+        save_agent_csv(agent_result, agent_csv_path)
+
+        if (i + 1) % 10 == 0 or (i + 1) == num_vehicles:
+            print(f"[per-agent] {i + 1}/{num_vehicles} agents done")
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="DOOT swarm simulation (2D) with GMM targets"
     )
 
     parser.add_argument("--num-vehicles", type=int, default=50,
-                        help="Number of vehicles in the swarm")
+                        help="Number of vehicles in the swarm (max 500)")
 
     parser.add_argument("--num-samples", type=int, default=125,
                         help="Number of target samples")
@@ -411,7 +521,13 @@ def parse_args():
                         help="Simulation final time (seconds)")
 
     parser.add_argument("--output-name", type=str, default="basic_usage_swarm",
-                        help="Base output name (used for .csv and .avi)")
+                        help="Base output name (used for file prefixes)")
+
+    parser.add_argument("--output-folder", type=str, default=None,
+                        help=(
+                            "Absolute path to the output folder. "
+                            "Defaults to <script_dir>/<output_name>_out/ when not specified."
+                        ))
 
     parser.add_argument("--elev", type=float, default=20.0,
                         help="3D camera elevation angle (degrees)")
@@ -420,10 +536,38 @@ def parse_args():
                         help="3D camera azimuth angle (degrees)")
 
     parser.add_argument("--no-3d-video", action="store_true",
-                        help="Disable 3D AVI output")
+                        help="Disable 3D OpenCV AVI output")
+
+    parser.add_argument("--no-animation", action="store_true",
+                        help="Disable quadrotor-mesh animation (animate.py / ffmpeg)")
+
+    parser.add_argument("--no-per-agent-plots", action="store_true",
+                        help="Disable per-agent plot and CSV generation")
+
+    parser.add_argument("--headless", action="store_true",
+                        help="Use the Agg (non-interactive) matplotlib backend for faster headless rendering")
 
     parser.add_argument("--use-cpu", action="store_true",
                         help="Force CPU even if CUDA is available")
+
+    # --- CBF options ---
+    parser.add_argument("--use-cbf", action="store_true",
+                        help="Enable density-based Control Barrier Function (B-CBF)")
+
+    parser.add_argument("--cbf-kde-bandwidth", type=float, default=0.3,
+                        help="KDE Gaussian kernel bandwidth (default: 0.3)")
+
+    parser.add_argument("--cbf-density-upper-bound", type=float, default=0.045,
+                        help="Upper density bound rho_max (default: 0.045)")
+
+    parser.add_argument("--cbf-density-lower-bound", type=float, default=0.011,
+                        help="Lower density bound rho_min (default: 0.011)")
+
+    parser.add_argument("--cbf-density-upper-gain", type=float, default=100.0,
+                        help="CBF gain for upper density constraint (default: 100.0)")
+
+    parser.add_argument("--cbf-density-lower-gain", type=float, default=1000.0,
+                        help="CBF gain for lower density constraint (default: 1000.0)")
 
     return parser.parse_args()
 
@@ -431,8 +575,34 @@ def parse_args():
 def run_world(args):
     import time
 
+    # ------------------------------------------------------------
+    # Headless backend (must be set before any plt import takes effect)
+    # ------------------------------------------------------------
+    if args.headless:
+        matplotlib.use("Agg")
+
     print("Start configuration")
     t0 = time.perf_counter()
+
+    # ------------------------------------------------------------
+    # Validate num-vehicles
+    # ------------------------------------------------------------
+    if args.num_vehicles > 500:
+        raise ValueError(f"--num-vehicles cannot exceed 500 (got {args.num_vehicles})")
+
+    # ------------------------------------------------------------
+    # Resolve output folder
+    # ------------------------------------------------------------
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    output_name = args.output_name
+
+    if args.output_folder is not None:
+        output_folder = args.output_folder
+    else:
+        output_folder = os.path.join(script_dir, output_name + "_out")
+
+    os.makedirs(output_folder, exist_ok=True)
+    print(f"Output folder: {output_folder}")
 
     # ------------------------------------------------------------
     # Select the device, CPU or GPU
@@ -455,7 +625,6 @@ def run_world(args):
     num_samples = args.num_samples
     num_gmm_components = args.num_gmm_components
     t_final = args.t_final
-    output_name = args.output_name
 
     world = World.from_file(
         os.path.abspath(
@@ -478,10 +647,6 @@ def run_world(args):
     # ------------------------------------------------------------
     extents = get_world_extents(world)
     x_min, x_max, y_min, y_max, z_min, z_max = extents.tolist()
-
-    vis_pad = 0.5
-    vis_x_min, vis_x_max = x_min - vis_pad, x_max + vis_pad
-    vis_y_min, vis_y_max = y_min - vis_pad, y_max + vis_pad
 
     # ------------------------------------------------------------
     # Fix the random seed
@@ -539,16 +704,31 @@ def run_world(args):
     # ------------------------------------------------------------
     # Initialize the coordinator
     # ------------------------------------------------------------
-    # Since BatchedDootCbfCoordinator only uses the number of vehicles,
-    # just pass a dummy list
     idxs = list(range(num_vehicles))
     vehicles_list = [None] * num_vehicles
+
+    cbf_config = None
+    if args.use_cbf:
+        cbf_config = CbfConfig(
+            kde_bandwidth=args.cbf_kde_bandwidth,
+            density_upper_bound=args.cbf_density_upper_bound,
+            density_lower_bound=args.cbf_density_lower_bound,
+            density_upper_gain=args.cbf_density_upper_gain,
+            density_lower_gain=args.cbf_density_lower_gain,
+        )
+        print(f"B-CBF enabled: bw={cbf_config.kde_bandwidth}, "
+              f"rho_max={cbf_config.density_upper_bound}, "
+              f"rho_min={cbf_config.density_lower_bound}, "
+              f"R={cbf_config.interaction_radius:.4f}")
+
     coordinator = BatchedDootCbfCoordinator(
         vehicles=vehicles_list,
         velocity_max=1.0,
         targeted_positions=targeted_positions_tensor,
         doot_config=doot_config,
-        idxs=idxs
+        apply_cbf=args.use_cbf,
+        cbf_config=cbf_config,
+        idxs=idxs,
     )
 
     # ------------------------------------------------------------
@@ -599,10 +779,10 @@ def run_world(args):
         init_positions,
         device=device,
         integrator="dopri5",
-        control_abstraction="cmd_motor_speeds", # ToDo: study and experiment other control settings
+        control_abstraction="cmd_motor_speeds",
     )
 
-    # Optional: specify feedback gains for each drone in the batch. (can be different for each drone)
+    # Optional: specify feedback gains for each drone in the batch.
     kp_pos = torch.tensor([6.5, 6.5, 15], device=device, dtype=dtype).repeat(num_vehicles, 1)
     kd_pos = torch.tensor([4.0, 4.0, 9], device=device, dtype=dtype).repeat(num_vehicles, 1)
     kp_att = torch.tensor([544.0], device=device, dtype=dtype).repeat(num_vehicles, 1)
@@ -613,7 +793,6 @@ def run_world(args):
         device=device,
         kp_pos=kp_pos, kd_pos=kd_pos,
         kp_att=kp_att, kd_att=kd_att)
-
 
     # ------------------------------------------------------------
     # Initialize trajectories
@@ -626,7 +805,7 @@ def run_world(args):
         yaw_speed_eps=1e-3,
     )
 
-    # IMPORTANT: seed initial vel cmd so update() won’t throw
+    # IMPORTANT: seed initial vel cmd so update() won't throw
     batched_trajectory.set_vel_cmd(torch.zeros((num_vehicles, 3), device=device, dtype=dtype))
 
     # ------------------------------------------------------------
@@ -689,7 +868,6 @@ def run_world(args):
     # Set initial state AFTER environment is created
     sim_instance.set_init(init_positions)
 
-
     # ------------------------------------------------------------
     # Run simulation
     # ------------------------------------------------------------
@@ -709,54 +887,83 @@ def run_world(args):
     t1 = time.perf_counter()
     print(f"Finish simulation in {t1 - t0:.3f} seconds")
 
-    # ------------------------------------------------------------
-    # Save results and generate visualization
-    # ------------------------------------------------------------
-    print("Start visualization output")
-    t0 = time.perf_counter()
-
-    # results['state'] is a list of dicts; each dict value may be list-like
+    # Ensure all state arrays are numpy before post-processing
     for k, v in results["state"].items():
         if isinstance(v, list):
             results["state"][k] = np.asarray(v)
 
-    # 2D video
-    vis_output_name = output_name + ".avi"
+    # ------------------------------------------------------------
+    # 2D OpenCV video
+    # ------------------------------------------------------------
+    print("Start 2D video output")
+    t0 = time.perf_counter()
+
+    vis_output_path = os.path.join(output_folder, output_name + "_2d.mp4")
     write_basic_usage_swarm_2d_video(
-        results, vis_output_name,
+        results, vis_output_path,
         x_min, x_max, y_min, y_max,
         num_vehicles, samples_xy, rng
     )
 
-    # 3D video
+    t1 = time.perf_counter()
+    print(f"Finish 2D video output in {t1 - t0:.3f} seconds")
+
+    # ------------------------------------------------------------
+    # 3D OpenCV video
+    # ------------------------------------------------------------
     if not args.no_3d_video:
-        vis_output_name_3d = output_name + "_3d.avi"
+        print("Start 3D video output")
+        t0 = time.perf_counter()
+
+        vis_output_path_3d = os.path.join(output_folder, output_name + "_3d.mp4")
         write_basic_usage_swarm_3d_video(
-            results, vis_output_name_3d,
+            results, vis_output_path_3d,
             x_min, x_max, y_min, y_max, z_min, z_max,
             num_vehicles, samples_xy, rng,
             elev=args.elev, azim=args.azim,
             fps=60,
         )
 
-    t1 = time.perf_counter()
-    print(f"Finish visualization output in {t1 - t0:.3f} seconds")
-
+        t1 = time.perf_counter()
+        print(f"Finish 3D video output in {t1 - t0:.3f} seconds")
 
     # ------------------------------------------------------------
-    # Save & postprocess
+    # Quadrotor-mesh animation (animate.py / ffmpeg)
     # ------------------------------------------------------------
-    print("Start CSV output")
+    if not args.no_animation:
+        print("Start quadrotor animation output")
+        t0 = time.perf_counter()
+
+        save_swarm_animation(results, output_folder, output_name, world,
+                              target_positions_xy=samples_xy)
+
+        t1 = time.perf_counter()
+        print(f"Finish quadrotor animation output in {t1 - t0:.3f} seconds")
+
+    # ------------------------------------------------------------
+    # Combined CSV
+    # ------------------------------------------------------------
+    print("Start combined CSV output")
     t0 = time.perf_counter()
 
-    out_dir = os.path.dirname(os.path.abspath(__file__))
-    csv_file_name = output_name + ".csv"
-    csv_path = os.path.join(out_dir, csv_file_name)
+    csv_path = os.path.join(output_folder, output_name + ".csv")
     save_basic_usage_swarm_csv(results, csv_path)
-    print(f"[basic_usage_swarm] CSV written to: {csv_path}")
+    print(f"[basic_usage_swarm] Combined CSV written to: {csv_path}")
 
     t1 = time.perf_counter()
-    print(f"Finish CSV output in {t1 - t0:.3f} seconds")
+    print(f"Finish combined CSV output in {t1 - t0:.3f} seconds")
+
+    # ------------------------------------------------------------
+    # Per-agent plots and individual CSVs
+    # ------------------------------------------------------------
+    if not args.no_per_agent_plots:
+        print("Start per-agent plot and CSV output")
+        t0 = time.perf_counter()
+
+        save_per_agent_outputs(results, world, output_folder, num_vehicles, output_name)
+
+        t1 = time.perf_counter()
+        print(f"Finish per-agent output in {t1 - t0:.3f} seconds")
 
 
 if __name__ == "__main__":

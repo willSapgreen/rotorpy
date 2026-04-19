@@ -4,6 +4,7 @@ from pathlib import Path
 import numpy as np
 from matplotlib.animation import FuncAnimation
 import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from scipy.spatial.transform import Rotation
 
 from rotorpy.utils.shapes import Quadrotor
@@ -29,7 +30,52 @@ def _decimate_index(time, sample_time):
     sample_index = np.round(np.interp(sample_time, time, index)).astype(int)
     return sample_index
 
-def animate(time, position, rotation, wind, animate_wind, world, filename=None, blit=False, show_axes=True, close_on_finish=False):
+def _build_target_pyramid_collection(target_positions, half_base=0.15, height=0.3, alpha=0.45):
+    """
+    Build a single Poly3DCollection containing true 3D square-base pyramids for
+    all target positions. All pyramids are drawn as one collection for efficiency.
+
+    Parameters
+    ----------
+    target_positions : (N, 3) array-like
+        World-frame (x, y, z) of each target. Pyramid base sits at z.
+    half_base : float
+        Half-width of the square base in world units.
+    height : float
+        Height of the pyramid apex above the base in world units.
+    alpha : float
+        Transparency of the collection (0 = invisible, 1 = opaque).
+
+    Returns
+    -------
+    Poly3DCollection
+    """
+    all_faces = []
+    for pos in target_positions:
+        cx, cy, cz = float(pos[0]), float(pos[1]), float(pos[2])
+        b = half_base
+        apex = [cx, cy, cz + height]
+        c0 = [cx - b, cy - b, cz]
+        c1 = [cx + b, cy - b, cz]
+        c2 = [cx + b, cy + b, cz]
+        c3 = [cx - b, cy + b, cz]
+        # Square base + 4 triangular side faces
+        all_faces.append([c0, c1, c2, c3])   # base
+        all_faces.append([c0, c1, apex])      # front
+        all_faces.append([c1, c2, apex])      # right
+        all_faces.append([c2, c3, apex])      # back
+        all_faces.append([c3, c0, apex])      # left
+
+    col = Poly3DCollection(
+        all_faces,
+        facecolor='lightgreen',
+        edgecolor='none',
+        alpha=alpha,
+    )
+    return col
+
+def animate(time, position, rotation, wind, animate_wind, world, filename=None, save_dir=None,
+            target_positions=None, blit=False, show_axes=True, close_on_finish=False):
     """
     Animate a completed simulation result based on the time, position, and
     rotation history. The animation may be viewed live or saved to a .mp4 video
@@ -52,6 +98,9 @@ def animate(time, position, rotation, wind, animate_wind, world, filename=None, 
         animate_wind, if True animate wind vector
         world, a World object
         filename, for saved video, or live view if None
+        save_dir, directory to save the video (overrides default data_out/). None uses data_out/.
+        target_positions, (K,3) array of static target positions to render as semi-transparent
+                          3D pyramids, or None to skip.
         blit, if True use blit for faster animation, default is False
         show_axes, if True plot axes, default is True
         close_on_finish, if True close figure at end of live animation or save, default is False
@@ -104,6 +153,12 @@ def animate(time, position, rotation, wind, animate_wind, world, filename=None, 
 
     world_artists = world.draw(ax)
 
+    # Static target position pyramids (drawn once, never updated).
+    if target_positions is not None:
+        targets_np = np.asarray(target_positions, dtype=float)
+        pyramid_col = _build_target_pyramid_collection(targets_np)
+        ax.add_collection3d(pyramid_col)
+
     title_artist = ax.set_title('t = {}'.format(time[0]))
 
     def init():
@@ -132,7 +187,10 @@ def animate(time, position, rotation, wind, animate_wind, world, filename=None, 
         print('Saving Animation')
         if not ".mp4" in filename:
             filename = filename + ".mp4"
-        path = os.path.join(os.path.dirname(__file__),'..','data_out',filename)
+        if save_dir is not None:
+            path = os.path.join(save_dir, filename)
+        else:
+            path = os.path.join(os.path.dirname(__file__),'..','data_out',filename)
         ani.save(path,
                  writer='ffmpeg',
                  fps=render_fps,

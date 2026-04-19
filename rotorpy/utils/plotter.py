@@ -29,7 +29,7 @@ class Plotter():
 
         return
 
-    def plot_results(self, plot_mocap, plot_estimator, plot_imu, fname=None):
+    def plot_results(self, plot_mocap, plot_estimator, plot_imu, fname=None, save_dir=None, show=True):
         """
         Plot the results
 
@@ -181,7 +181,10 @@ class Plotter():
 
         if fname is not None:
 
-            root_path = os.path.join(os.path.dirname(__file__),'..','data_out')
+            if save_dir is not None:
+                root_path = save_dir
+            else:
+                root_path = os.path.join(os.path.dirname(__file__),'..','data_out')
             fig_3d.savefig(os.path.join(root_path, fname+'_3dpath.png'))
             fig_posvel.savefig(os.path.join(root_path, fname+'_posvel.png'))
             fig_attrate.savefig(os.path.join(root_path, fname+'_attrate.png'))
@@ -197,7 +200,8 @@ class Plotter():
                     fig_filter.savefig(os.path.join(root_path, fname+'_filter.png'))
                     fig_cov.savefig(os.path.join(root_path, fname+'_cov.png'))
 
-        plt.show()
+        if show:
+            plt.show()
 
         return
 
