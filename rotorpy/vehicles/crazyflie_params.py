@@ -5,6 +5,7 @@ Additional sources:
     https://bitcraze.io/2015/02/measuring-propeller-rpm-part-3
     https://wiki.bitcraze.io/misc:investigations:thrust
     https://commons.erau.edu/cgi/viewcontent.cgi?article=2057&context=publication
+    "Data-Driven System Identification of Quadrotors Subject to Motor Delays", Eschmann et al. 2024. https://arxiv.org/abs/2404.07837
 Notes:
     k_thrust is inferred from 14.5 g thrust at 2500 rad/s
     k_drag is mostly made up
@@ -68,6 +69,9 @@ quad_params = {
     'k_z':   7.553e-07,         # induced inflow coefficient N/(rad*m/s**2) = kg/rad
     'k_h':   0.0,               # translational lift coefficient (N/(m/s)**2) = kg/m
     'k_flap': 0.0,              # Flapping moment coefficient Nm/(rad*m/s**2) = kg*m/rad
+
+    # Motor properties
+    'tau_m': 0.072,           # motor response time, seconds
     'rotor_speed_min': 0,       # rad/s
     'rotor_speed_max': 2500,    # rad/s
 
@@ -81,16 +85,9 @@ quad_params = {
     'motor_noise_std': 0.0,     # rad/s
 
     # Lower level controller properties (for higher level control abstractions)
-    #   k_w: Make the drone track a desired body angular rate.
-    #        Larger k_w → drone reacts faster to desired roll/pitch/yaw rates
-    #   k_v: Make the drone track a desired world-frame velocity
-    #        High k_v → drone corrects velocity errors quickly
-    #   kp_att: Track a desired attitude or desired thrust direction
-    #           Higher kp_att → stronger correction torque → snappier attitude tracking
-    #   kd_att: Damp attitude error and counteract angular velocity
-    #           Higher kd_att → less overshoot → smoother attitude response
-    'k_w': 1,               # The body rate P gain (for cmd_ctbr)
+    'k_w': 200,               # The body rate P gain (for cmd_ctbr)
     'k_v': 10,              # The *world* velocity P gain (for cmd_vel)
     'kp_att': 1030,      # The attitude P gain (for cmd_vel, cmd_acc, and cmd_ctatt)
     'kd_att': 51,       # The attitude D gain (for cmd_vel, cmd_acc, and cmd_ctatt)
+
 }

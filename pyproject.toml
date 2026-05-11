@@ -1,6 +1,6 @@
 [project]
 name = "rotorpy"
-version = "2.1.0"
+version = "2.1.2"
 description = "A multirotor simulator with aerodynamics for education and research."
 readme = "README.md"
 requires-python = ">=3.8"
@@ -29,14 +29,16 @@ dependencies = [
     'pandas',
     'tqdm',
     'gymnasium',
-    'roma',           # For batched sim
-    'torch>=1.11.0',  # For batched sim
-    'torchdiffeq',    # For batched sim
-    'opt-einsum',     # For batched sim
     'timed_count',    # Only for ardupilot sitl example
 ]
 
 [project.optional-dependencies]
+batched = [
+    'torch>=1.11.0',
+    'torchdiffeq',
+    'roma',
+    'opt-einsum',
+]
 learning = [
     'stable_baselines3',
     'tensorboard',
@@ -49,19 +51,34 @@ testing = [
     'pytest',
     'filterpy == 1.4.5',
     'stable_baselines3',
-    'pymavlink'
+    'foundation-policy==1.0.1',
+    'pymavlink',
+    'torch>=1.11.0',
+    'torchdiffeq',
+    'roma',
+    'opt-einsum',
 ]
 filter = [
     'filterpy == 1.4.5',
+]
+raptor = [
+    'stable_baselines3',
+    'tensorboard',
+    'foundation-policy==1.0.1',
 ]
 px4 = [
     'pymavlink',
 ]
 all = [
+    "torch>=1.11.0",
+    "torchdiffeq",
+    "roma",
+    "opt-einsum",
     "stable_baselines3",
     "tensorboard",
     "pytest",
     "filterpy == 1.4.5",
+    "foundation-policy==1.0.1",
     "pymavlink",
 ]
 
